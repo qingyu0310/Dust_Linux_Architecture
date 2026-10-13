@@ -1,0 +1,37 @@
+# 构建产物（dust build / CMake / colcon）
+build/
+install/
+log/
+logs/
+Testing/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+
+# 编译中间件与二进制
+*.o
+*.a
+*.so
+*.dylib
+
+# Python 缓存（launch 的 __pycache__）
+__pycache__/
+*.py[cod]
+
+# 编辑器与 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# clangd 索引缓存；.clangd 是本工程的配置，保留提交
+.cache/
+
+# MVS SDK 运行期生成的日志目录
+MvSdkLog/
+
+# 参考工程与下载材料
+temp/
