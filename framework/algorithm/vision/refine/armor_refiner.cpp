@@ -218,7 +218,7 @@ LightDetectionResult DetectLights(const cv::Mat& image, const ArmorRefiner::Conf
 LightBar TranslateLight(const LightBar& light, const cv::Point2f& offset)
 {
     return *LightBar::CreateFromEndpoints(light.GetId(), light.GetTop() + offset, light.GetBottom() + offset, 
-                                       light.GetWidth(), light.GetColor(), light.GetColorScore());
+                                       light.GetWidth(),      light.GetColor(),          light.GetColorScore());
 }
 
 } // namespace

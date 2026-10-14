@@ -27,18 +27,18 @@ namespace algorithm::vision
  */
 struct ArmorDetectionStats
 {
-    std::size_t raw_rows                   {0}; // 模型输出总行数
-    std::size_t score_passed               {0}; // 通过初筛 objectness 的行数
-    std::size_t nms_kept                   {0}; // NMS 后保留的候选数
-    std::size_t accepted                   {0}; // 最终发布的红、蓝有效装甲数
-    std::size_t rejected_confidence        {0}; // NMS 后未通过最终置信度的候选数
-    std::size_t rejected_color             {0}; // 灰色、紫色或越界颜色候选数
-    std::size_t rejected_label_type        {0}; // 标签越界或尺寸规则不一致候选数
-    std::size_t rejected_geometry          {0}; // 四点、外接矩形或图像边界无效候选数
-    float       max_objectness             {0.0f}; // 当前帧全部行的最大 sigmoid objectness
-    double      preprocess_ms              {0.0}; // 补零、RGB/NCHW 和 FP16/FP32 转换耗时
-    double      inference_ms               {0.0}; // H2D、enqueueV3、D2H 和同步总耗时
-    double      postprocess_ms             {0.0}; // 解码、NMS、映射与几何校验耗时
+    std::size_t raw_rows                   {0};         // 模型输出总行数
+    std::size_t score_passed               {0};         // 通过初筛 objectness 的行数
+    std::size_t nms_kept                   {0};         // NMS 后保留的候选数
+    std::size_t accepted                   {0};         // 最终发布的红、蓝有效装甲数
+    std::size_t rejected_confidence        {0};         // NMS 后未通过最终置信度的候选数
+    std::size_t rejected_color             {0};         // 灰色、紫色或越界颜色候选数
+    std::size_t rejected_label_type        {0};         // 标签越界或尺寸规则不一致候选数
+    std::size_t rejected_geometry          {0};         // 四点、外接矩形或图像边界无效候选数
+    float       max_objectness             {0.0f};      // 当前帧全部行的最大 sigmoid objectness
+    double      preprocess_ms              {0.0};       // 补零、RGB/NCHW 和 FP16/FP32 转换耗时
+    double      inference_ms               {0.0};       // H2D、enqueueV3、D2H 和同步总耗时
+    double      postprocess_ms             {0.0};       // 解码、NMS、映射与几何校验耗时
 };
 
 /**
@@ -46,8 +46,8 @@ struct ArmorDetectionStats
  */
 struct ArmorDetectionResult
 {
-    std::vector<DetectedArmor> armors; // 按 NMS 结果顺序排列的有效装甲
-    ArmorDetectionStats stats;         // 本帧逐级计数和耗时
+    std::vector<DetectedArmor> armors;                  // 按 NMS 结果顺序排列的有效装甲
+    ArmorDetectionStats stats;                          // 本帧逐级计数和耗时
 };
 
 /**
@@ -61,14 +61,25 @@ class ArmorDetector final
 public:
     struct Config
     {
-        std::string engine_path;                    // 本机 TensorRT engine 绝对路径
-        int         cuda_device          {0};       // CUDA device 编号
-        float       score_threshold      {0.7f};    // NMS 前 objectness 初筛
-        float       confidence_threshold {0.8f};    // NMS 后最终置信度门限（严格大于）
-        float       nms_threshold        {0.3f};    // NMS IoU 门限
+        std::string engine_path;                        // 本机 TensorRT engine 绝对路径
+        int         cuda_device          {0};           // CUDA device 编号
+        float       score_threshold      {0.7f};        // NMS 前 objectness 初筛
+        float       confidence_threshold {0.8f};        // NMS 后最终置信度门限（严格大于）
+        float       nms_threshold        {0.3f};        // NMS IoU 门限
     };
 
+    /**
+     * @brief 加载并校验 TensorRT engine，创建检测器资源
+     *
+     * @param config 检测器配置
+     * @throws std::invalid_argument 配置不合法
+     * @throws std::runtime_error engine、CUDA 或 TensorRT 初始化失败
+     */
     explicit ArmorDetector(const Config& config);
+
+    /**
+     * @brief 释放检测器持有的 TensorRT 与 CUDA 资源
+     */
     ~ArmorDetector();
 
     ArmorDetector(const ArmorDetector&) = delete;
@@ -86,9 +97,11 @@ public:
         return config_;
     }
 
-    // 下面三个要读 Impl 的成员，而 Impl 在头文件里是不完整类型，只能定义在 cpp
+
     const std::string& GetInputName() const noexcept;
+
     const std::string& GetOutputName() const noexcept;
+
     const std::string& GetInputTypeName() const noexcept;
 
     /**

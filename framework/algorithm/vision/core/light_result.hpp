@@ -77,7 +77,7 @@ struct LightRejection
  */
 struct LightDetectionResult
 {
-    LightDetectionStats   stats;                // 本帧逐级筛选统计
+    LightDetectionStats stats;                  // 本帧逐级筛选统计
     std::vector<LightBar> lights;               // 按中心横坐标从左到右排列的灯条
     std::vector<LightRejection> rejections;     // 被拒绝亮区，供离线可视化定位门限
 };

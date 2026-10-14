@@ -63,6 +63,7 @@ std::size_t TensorElements(const nvinfer1::Dims& shape)
     std::size_t elements = 1;
     for (int index = 0; index < shape.nbDims; ++index)
     {
+        // 用除法提前判溢出：等到乘法溢出再比较就已经晚了
         if (shape.d[index] <= 0 || elements > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(shape.d[index]))
         {
             throw std::runtime_error("TensorRT requires positive static tensor dimensions");
@@ -78,6 +79,7 @@ std::size_t TensorElements(const nvinfer1::Dims& shape)
  */
 float Sigmoid(float value)
 {
+    // 分两段是为了让指数里的量恒为非正：exp 的结果落在 (0, 1]，哪个方向都不溢
     if (value >= 0.0f)
     {
         return 1.0f / (1.0f + std::exp(-value));
@@ -94,6 +96,7 @@ int ArgMax(const float* values, int count)
     int best = 0;
     for (int index = 1; index < count; ++index)
     {
+        // 用严格大于：并列时保留靠前的分支，同一帧的结果才稳定
         if (values[index] > values[best]) {
             best = index;
         }
@@ -120,11 +123,13 @@ class TensorRTLogger final : public nvinfer1::ILogger
 public:
     void log(Severity severity, const char* message) noexcept override
     {
+        // 级别比 ERROR 低的不参与拼异常：解序列化失败的原因一定是 ERROR
         if (severity > Severity::kERROR || message == nullptr)
         {
             return;
         }
 
+        // 本回调可能在 TensorRT 内部线程里触发，所以锁内只做一次赋值，且不允许抛出
         try
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -169,6 +174,7 @@ struct ArmorDetector::Impl
      */
     explicit Impl(const Config& config) : config_(config)
     {
+        // 先校验配置再碰 CUDA：配置不合法时不该留下半初始化的设备状态
         ValidateConfig();
         try
         {
@@ -195,6 +201,7 @@ struct ArmorDetector::Impl
      */
     void ValidateConfig() const
     {
+        // 三个门限都是概率，统一按有限性与 [0,1] 校验
         const auto valid_probability = [](float value)
         {
             return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
@@ -208,6 +215,7 @@ struct ArmorDetector::Impl
         {
             throw std::invalid_argument("CUDA device must be non-negative");
         }
+        // 终石门限低于初筛没有意义：初筛已经把更低的置信度都挡掉了
         if (!valid_probability(config_.score_threshold) ||
             !valid_probability(config_.confidence_threshold) ||
             !valid_probability(config_.nms_threshold) ||
@@ -285,6 +293,7 @@ struct ArmorDetector::Impl
                 throw std::runtime_error("0526 engine requires linear device tensors");
             }
 
+            // 同一侧出现第二个张量说明引擎不是 0526 那一版，宁可在这里拒绝
             std::string& destination = engine_.cuda_engine->getTensorIOMode(tensor_name) == nvinfer1::TensorIOMode::kINPUT ? contract_.input_name : contract_.output_name;
             if (!destination.empty())
             {
@@ -298,6 +307,7 @@ struct ArmorDetector::Impl
             throw std::runtime_error("TensorRT engine is missing an input or output tensor");
         }
 
+        // 形状在初始化期一次对齐：跑到后处理才发现是错形状，读出来的就是一整块脏数据
         const nvinfer1::Dims input_shape  = engine_.cuda_engine->getTensorShape(contract_.input_name.c_str());
         const nvinfer1::Dims output_shape = engine_.cuda_engine->getTensorShape(contract_.output_name.c_str());
 
@@ -306,12 +316,14 @@ struct ArmorDetector::Impl
             throw std::runtime_error("0526 input shape must be [1,3,640,640]");
         }
 
+        // 输出带不带 batch 维都接受：只认最后两维是 25200×22
         if ((output_shape.nbDims != 2 && output_shape.nbDims != 3) || (output_shape.nbDims == 3 && output_shape.d[0] != 1) || 
              output_shape.d[output_shape.nbDims - 2] != kModelOutputRows || output_shape.d[output_shape.nbDims - 1] != kModelOutputCols)
         {
             throw std::runtime_error("0526 output shape must be [1,25200,22] or [25200,22]");
         }
 
+        // 输入 FP16 / FP32 都支持（预处理按类型决定要不要转半精度），输出固定按 FP32 读
         contract_.input_type = engine_.cuda_engine->getTensorDataType(contract_.input_name.c_str());
         if (contract_.input_type != nvinfer1::DataType::kHALF && contract_.input_type != nvinfer1::DataType::kFLOAT)
         {
@@ -366,10 +378,12 @@ struct ArmorDetector::Impl
      */
     void Release() noexcept
     {
+        // 先切回自己那块设备：cudaFree / cudaFreeHost 只对当前设备上的指针生效
         if (config_.cuda_device >= 0)
         {
             cudaSetDevice(config_.cuda_device);
         }
+        // 销毁缓冲之前先等流跑完，否则可能释放掉还在被拷贝的显存
         if (transfer_.stream != nullptr)
         {
             cudaStreamSynchronize(transfer_.stream);
@@ -416,16 +430,20 @@ struct ArmorDetector::Impl
      */
     double Preprocess(const cv::Mat& bgr_image)
     {
+        // 取较小的那个方向做等比缩放：长边正好贴到 640，短边空出来的地方留给 0，不拉伸、不居中
         const double scale       = std::min(static_cast<double>(kModelInputWidth) / bgr_image.cols,  static_cast<double>(kModelInputHeight) / bgr_image.rows);
         const int resized_width  = std::clamp(static_cast<int>(bgr_image.cols * scale), 1, kModelInputWidth);
         const int resized_height = std::clamp(static_cast<int>(bgr_image.rows * scale), 1, kModelInputHeight);
 
+        // 画布先清零：上一帧缩放图之外的残留像素会跟着这一帧一起进网络
         scratch_.canvas.setTo(cv::Scalar(0, 0, 0));
 
         cv::resize(bgr_image, scratch_.canvas(cv::Rect(0, 0, resized_width, resized_height)), cv::Size(resized_width, resized_height));
 
+        // 直接出 NCHW FP32：按 1/255 缩放、不减均值、不裁剪，swapRB 打开所以进网络的通道是 RGB
         cv::dnn::blobFromImage(scratch_.canvas, scratch_.chw, 1.0 / 255.0, cv::Size(), cv::Scalar(), true, false, CV_32F);
 
+        // FP16 引擎要先把 NCHW 转半精度再写进锁页缓冲；FP32 引擎直接整块拷贝
         if (contract_.input_type == nvinfer1::DataType::kHALF)
         {
             const int shape[] = {1, 3, kModelInputHeight, kModelInputWidth};
@@ -447,6 +465,8 @@ struct ArmorDetector::Impl
     void Infer()
     {
         CudaCheck(cudaSetDevice(config_.cuda_device), "cudaSetDevice");
+
+        // 拷贝与内核都入队到同一条流上，顺序由流保证；这里不等待，最后一次性同步
         CudaCheck(cudaMemcpyAsync(transfer_.device_input, transfer_.host_input,   contract_.input_bytes, cudaMemcpyHostToDevice, transfer_.stream), "cudaMemcpyAsync input");
 
         if (!engine_.context->enqueueV3(transfer_.stream))
@@ -455,6 +475,8 @@ struct ArmorDetector::Impl
         }
 
         CudaCheck(cudaMemcpyAsync(transfer_.host_output, transfer_.device_output, contract_.output_bytes, cudaMemcpyDeviceToHost, transfer_.stream), "cudaMemcpyAsync output");
+
+        // 同步返回之后输出才真正落在主机缓冲里，Postprocess 依赖这一点
         CudaCheck(cudaStreamSynchronize(transfer_.stream), "cudaStreamSynchronize");
     }
 
@@ -483,6 +505,7 @@ struct ArmorDetector::Impl
         boxes.reserve(256);
         confidences.reserve(256);
 
+        // 第一遍只做初筛与反算：绝大多数行会被 objectness 挡掉，不做后面那串几何与类别判断
         for (int row_index = 0; row_index < kModelOutputRows; ++row_index)
         {
             const float* row = output + static_cast<std::size_t>(row_index) * kModelOutputCols;
@@ -505,11 +528,13 @@ struct ArmorDetector::Impl
                 cv::Point2f(row[2] * inverse_scale, row[3] * inverse_scale)
             };
 
+            // 四点顺手算出包围盒和中心，同时判掉非有限值；NMS 只要整数框
             float min_x = corners[0].x;
             float max_x = corners[0].x;
             float min_y = corners[0].y;
             float max_y = corners[0].y;
             cv::Point2f center(0.0f, 0.0f);
+
             bool finite = true;
             for (const cv::Point2f& point : corners)
             {
@@ -551,6 +576,7 @@ struct ArmorDetector::Impl
         result.stats.nms_kept = kept_indices.size();
         result.armors.reserve(kept_indices.size());
 
+        // 第二遍只走 NMS 留下来的候选：终选置信度、颜色、标签与尺寸、几何校验依次过一遍
         for (int candidate_index : kept_indices)
         {
             if (candidate_index < 0 || static_cast<std::size_t>(candidate_index) >= candidates.size())
@@ -566,8 +592,7 @@ struct ArmorDetector::Impl
                 continue;
             }
 
-            const std::optional<TeamColor> color =
-                DecodeArmorModelColor(candidate.raw_color_id);
+            const std::optional<TeamColor> color = DecodeArmorModelColor(candidate.raw_color_id);
             if (!color)
             {
                 ++result.stats.rejected_color;
@@ -611,6 +636,7 @@ struct ArmorDetector::Impl
      */
     ArmorDetectionResult Detect(const cv::Mat& bgr_image)
     {
+        // 三段串行，逐段计时：现场从统计里就能看出瓶颈是在缩放、推理还是解码
         const auto preprocess_begin = std::chrono::steady_clock::now();
         const double scale = Preprocess(bgr_image);
         const auto preprocess_end   = std::chrono::steady_clock::now();
@@ -703,6 +729,7 @@ ArmorDetector::~ArmorDetector() = default;
  */
 ArmorDetectionResult ArmorDetector::Detect(const cv::Mat& bgr_image)
 {
+    // 类型在对外这层挡掉：Impl 内部假定拿到的就是非空 CV_8UC3，不再重复检查
     if (bgr_image.empty() || bgr_image.type() != CV_8UC3)
     {
         throw std::invalid_argument("ArmorDetector requires a non-empty CV_8UC3 BGR image");
@@ -710,16 +737,28 @@ ArmorDetectionResult ArmorDetector::Detect(const cv::Mat& bgr_image)
     return impl_->Detect(bgr_image);
 }
 
+/**
+ * @brief 获取 TensorRT engine 的输入张量名称
+ * @return 输入张量名称的常量引用；生命周期与检测器相同
+ */
 const std::string& ArmorDetector::GetInputName() const noexcept
 {
     return impl_->contract_.input_name;
 }
 
+/**
+ * @brief 获取 TensorRT engine 的输出张量名称
+ * @return 输出张量名称的常量引用；生命周期与检测器相同
+ */
 const std::string& ArmorDetector::GetOutputName() const noexcept
 {
     return impl_->contract_.output_name;
 }
 
+/**
+ * @brief 获取 TensorRT engine 输入数据类型的可读名称
+ * @return 输入类型名称（例如 FP16 或 FP32）的常量引用；生命周期与检测器相同
+ */
 const std::string& ArmorDetector::GetInputTypeName() const noexcept
 {
     return impl_->contract_.input_type_name;

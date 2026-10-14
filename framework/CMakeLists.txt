@@ -6,10 +6,8 @@ target_link_libraries(framework_algorithm INTERFACE Eigen3::Eigen)
 
 add_library(framework_vision STATIC
     algorithm/vision/core/detections.cpp
-    algorithm/vision/core/armor_board.cpp
     algorithm/vision/core/light_bar.cpp
     algorithm/vision/detect/model_decode.cpp
-    algorithm/vision/detect/light_detector.cpp
     algorithm/vision/detect/armor_detector.cpp
     algorithm/vision/refine/armor_refiner.cpp)
 target_include_directories(framework_vision PUBLIC ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})

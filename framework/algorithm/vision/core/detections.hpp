@@ -29,7 +29,7 @@ struct DetectedArmorGeometry
 {
     std::array<cv::Point2f, 4> corners;     // LT、RT、RB、LB
     cv::Point2f center;                     // 四角点平均位置，pixel
-    cv::Rect2f bounding_box;                // 四角点的轴对齐外接矩形，pixel
+    cv::Rect2f  bounding_box;               // 四角点的轴对齐外接矩形，pixel
 };
 
 /**

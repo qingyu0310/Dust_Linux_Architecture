@@ -42,11 +42,10 @@ using detail::IsValidQuadrilateral;
  */
 std::optional<DetectedArmor> DetectedArmor::Create(const DetectedArmorGeometry& geometry, const DetectedArmorIdentity& identity, float confidence, const cv::Size& image_size)
 {
-    const bool box_is_valid = IsFinite(geometry.bounding_box.x) && IsFinite(geometry.bounding_box.y) && IsFinite(geometry.bounding_box.width) &&
+    const bool box_is_valid = IsFinite(geometry.bounding_box.x)      && IsFinite(geometry.bounding_box.y)       && IsFinite(geometry.bounding_box.width) &&
                               IsFinite(geometry.bounding_box.height) && geometry.bounding_box.width > kGeometryEpsilon && geometry.bounding_box.height > kGeometryEpsilon;
 
-    const bool corners_inside = image_size.width > 0 && image_size.height > 0 &&
-    std::all_of(geometry.corners.begin(), geometry.corners.end(), [&image_size](const cv::Point2f& point)
+    const bool corners_inside = image_size.width > 0 && image_size.height > 0 && std::all_of(geometry.corners.begin(), geometry.corners.end(),  [&image_size](const cv::Point2f& point)
     {
         return IsFinite(point) && point.x >= 0.0f && point.y >= 0.0f && point.x <= static_cast<float>(image_size.width - 1) &&  point.y <= static_cast<float>(image_size.height - 1);
     });
