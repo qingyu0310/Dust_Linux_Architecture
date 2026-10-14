@@ -2,10 +2,15 @@
 add_executable(vision_app ${PROJECT_SOURCE_DIR}/framework/init/main.cpp
     ${PROJECT_SOURCE_DIR}/framework/cmd/shell/shell.cpp)
 add_subdirectory(thread)
-target_link_libraries(vision_app PRIVATE framework_core framework_algorithm framework_topic framework_modules)
+target_link_libraries(vision_app PRIVATE
+    framework_core framework_algorithm framework_topic framework_modules framework_vision)
+target_compile_definitions(vision_app PRIVATE ARMOR_ENGINE_PATH="${ARMOR_ENGINE_PATH}")
 # MVS 动态加载 USB 传输层，其依赖也须从同一 SDK 目录解析。
 get_filename_component(_hikrobot_runtime_dir "${HIKROBOT_LIBRARY}" DIRECTORY)
 set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH "${_hikrobot_runtime_dir}")
+get_filename_component(_tensorrt_runtime_dir "${TensorRT_LIBRARY}" DIRECTORY)
+set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH
+    "${_tensorrt_runtime_dir}" "${CUDAToolkit_LIBRARY_DIR}")
 target_link_options(vision_app PRIVATE "LINKER:--disable-new-dtags")
 target_compile_options(vision_app PRIVATE -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections)
 target_link_options(vision_app PRIVATE

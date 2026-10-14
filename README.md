@@ -1,99 +1,109 @@
-# Linux 视觉基础骨架
+# Dust Vision Architecture
 
-原生 C++17 Linux 进程，采用 Dust 六层职责和 ELF 注册式启动，不依赖 ROS2。摄像头与识别模块尚未实现，对应目录保留为空。现有纯计算算法保留。
+原生 C++17 Linux 进程：海康 USB3 工业相机持续取帧，经**进程内发布订阅话题**交给显示与识别两个消费者各自处理。
+采用四层职责 + ELF 注册式启动，**不依赖 ROS 2**。
 
-## 构建与运行
+## 当前做到哪一步
 
-在项目根目录或其子目录执行：
+| 部分 | 状态 |
+| --- | --- |
+| 相机采集 | ✅ 海康 MVS，1440×1080 BayerRG8 → BGR；连续采集、掉线自动重连 |
+| 启动容错 | ✅ 设备没插时**先探到设备再初始化**，进程不退出、只在等（避免反复初始化 SDK） |
+| 帧出口 | ✅ 进程内话题：单槽最新帧 + 每个订阅者独立游标（慢的丢最旧，不反压采集） |
+| 显示 | ✅ 本机窗口，运行期 `var set display.show 0/1` 开关（默认开） |
+| 识别 | 🟡 阶段 1 完成：二维类型、灯条长轴规范化、装甲配对评分与冲突消解测试通过；图像灯条提取和运行链尚未接入 |
+| 调试台 | ✅ `DUST_LOG` 四色 + DBG 选择；`dust>` 交互 shell（`log` / `var`）；每线程自带 YAML |
+| 未做 | 图像灯条提取、数字分类、云台/串口输出、远端可视化；`mujoco/` 目录在，但不参与根 CMake 构建 |
 
-```bash
-dust build       # 增量编译
-dust build -p    # 清空 build 后全量编译
-dust run         # 运行 build/project/vision_app
+## 数据流
+
+```mermaid
+flowchart LR
+    A[相机线程 Task<br/>MV_CC_GetImageBuffer + Bayer→BGR] -->|Publish| B[话题 pub_camera_to_<br/>单槽最新帧 + 全局序号]
+    B -->|Wait 阻塞等新帧| C[显示订阅者<br/>主线程回调 imshow]
+    B -->|Wait 阻塞等新帧| D[识别订阅者<br/>独立线程 → 算法]
 ```
 
-入口脚本位于 `framework/cmd/build`。`.vscode/settings.json` 仅为本工作区的 VS Code 集成终端添加该目录到 PATH。打开本工程后新建终端即可使用；已有终端需关闭后重新创建。普通系统终端可在工程根目录执行 `./framework/cmd/build/dust build`，无需全局安装。
-
-构建使用原生 CMake，默认 Debug，产物和真实 `compile_commands.json` 保存在根目录 `build`。`dust run` 直接运行现有程序，保留终端输入、Ctrl+C 和程序退出码。
-
-Ctrl+C 或 SIGTERM 正常退出。每个业务线程在自己的子目录保存 YAML，由对应 `thread_init()` 使用 `cmd::config::Config` 类读取，没有总配置文件或全局参数结构。
-
-当前 test 线程配置为 `project/thread/test/trd_test.yaml`，`heartbeat_ms` 是心跳间隔，`run_duration_ms` 为 0 时持续运行，正数时运行指定毫秒数。
-
-`project/thread/CMakeLists.txt` 统一装配线程源码，并将 YAML 复制到 `build/project/thread/test/trd_test.yaml`。修改源码目录 YAML 后执行构建即可同步，无需修改 C++；修改运行目录 YAML 后，重启程序生效。程序按 `/proc/self/exe` 定位可执行文件旁的线程 YAML，不依赖工作目录。复制程序部署时，应同时保留旁边的 `thread/test/trd_test.yaml`。
+- **取走不清空**：订阅者拿到的是浅拷贝（`cv::Mat` 引用计数共享像素），各自推进自己的游标，互不抢帧；
+- **只在有新帧时被唤醒**：空闲 0 唤醒，没有轮询、没有定时器（唯一例外是主线程显示，见下）；
+- 相机线程与消费者之间**没有背压**：识别慢了就丢最旧（`Dropped()` 记着），采集永不被拖住。
 
 ## 分层
 
-- `framework/algorithm`：现有计算库。
-- `framework/drivers`、`modules`：设备与视觉能力预留。
-- `framework/topic`：图像和结果契约，使用 OpenCV 数据类型。
-- `framework/cmd`：DUST_LOG、调试台与 YAML 读取类。
-- `framework/init`：ELF 注册表、阶段启动、线程停止等待与信号退出。
-- `project`：业务线程及各线程自带 YAML，统一入口位于 framework/init，目前只运行心跳循环。
+| 层 | 内容 | 依赖 |
+| --- | --- | --- |
+| `framework/algorithm` | 通用算法（纯头文件） | 仅 Eigen |
+| `framework/topic` | 发布订阅通道 + 话题（相机帧） | OpenCV 数据类型 |
+| `framework/cmd` | `DUST_LOG`、调试台 shell、调试变量 `var`、YAML 读取 | yaml-cpp |
+| `framework/init` | 注册式生命周期、线程封装与恢复 hook、信号 | 无业务依赖 |
+| `framework/modules` | 设备模块（海康相机 MVS） | MVS SDK |
+| `framework/drivers` | 驱动/通信预留（目录在，尚无实现） | — |
+| `project/thread` | 业务线程：`camera` / `display` / `vision` / `test` | 上面各层 |
+| `mujoco` | MuJoCo SDK 包装与资源目录 | MVS 之外的仿真用，暂不参与构建 |
 
-## 注册接口
+依赖单向：`project` → `framework/*`；`framework/algorithm` 不碰 ROS/相机，与具体机器人无关。**每层只拿自己那层的数据**（键盘不认识底盘身高，话题不认识业务）。
 
-```cpp
-REGISTER_INIT(Initialize, AppInit, High, HaltOnFail, Release, "app_init");
-REGISTER_THREAD(Start, AppThread, Stop, Join, "app_thread");
-```
+## 启动与关闭
 
-初始化注册参数依次是函数、阶段、等级、失败策略、清理函数和名称。线程注册参数是启动函数、阶段、停止通知函数、等待函数和名称。Linux 版本保留清理回调，参数数量与 Zephyr 原宏不同。
-
-同阶段初始化按 High → Mid → Low 执行，同等级允许多个注册项；同等级初始化与同阶段线程启动按链接表遍历，不另设数字优先级。停机行为由失败策略决定。初始化返回失败或抛出异常时，本项清理函数仍会执行，必须能处理部分初始化。线程启动函数启动线程后立即返回；独立 `Task(void*, void*, void*)` 承载业务循环，`thread_start()` 仅调用 `thread_.Start(Task, nullptr, "test")`；任务异常由公共线程入口捕获并报告停止。Linux 基础版本使用默认调度策略，未移植 Zephyr 栈大小模板和实时优先级。
-
-`System_Startup()` 一次启动，`System_WaitForStop()` 等待信号或业务停止请求，`System_Shutdown()` 先向所有已启动线程通知停止，再逆序等待，最后逆序释放资源。Shutdown 可重复调用；不支持同进程内重新启动。启动和关闭只由主线程执行。
-
-注册段内收集固定大小指针，链接脚本 KEEP 保留，注册源直接进入可执行程序。不得直接将注册源放入未引用的普通静态库而假定其自动加载。框架线程封装的可中断等待适用于基础线程；未来设备阻塞操作还需后端专门处理。
-
-## 基线与验证
-
-原 ament CMake、ROS2 包清单、launch 和 clangd 配置已归档到 `temp/baseline_linux_skeleton`。MuJoCo 目录未修改，不参加根 CMake 构建。
-
-已验证 Debug/Release 编译、注册段存在、初始化失败清理顺序和重复关闭、配置拒绝错误键及重复键、有限时长退出、SIGINT/SIGTERM 停止并等待线程。尚未验证摄像头、图像处理或目标板部署。
-
-## DUST_LOG 与终端调试
-
-日志位于 `framework/cmd/shell`，调用接口与子树一致：
+业务组件用注册宏声明，链接器把它们收进段表，主线程按阶段遍历启动：
 
 ```cpp
-DUST_LOG_INF("普通日志 %d", value);
-DUST_LOG_ERR("错误 %s", reason);
-DUST_LOG_OK("初始化成功");
-DUST_LOG_WRN("警告");
-DUST_LOG_DBG("test", "调试数据 %.3f", value);
+REGISTER_INIT(thread_init, EarlyInit, High, HaltOnFail, Release, "camera_init");
+REGISTER_THREAD(thread_start, EarlyThread, thread_stop, thread_join, "camera_start");
 ```
 
-DBG 默认静默，在运行终端输入：
+- 顺序：`PreInit/PreThread`（调试台）→ `EarlyInit/EarlyThread`（相机）→ `AppInit/AppThread`（显示、识别、test）；同阶段内 High → Mid → Low；
+- 关闭：`System_Shutdown()` **先对所有线程 `request_stop`，再统一 `join`，最后逆序释放资源**——所以"卡在等帧上的订阅者"一定会在相机线程关闭通道后被唤醒；
+- 业务 `Task` 里**不写 catch、不写重连**：出错直接抛出，由框架 `Thread::Run` 接住并询问注册的 **RecoveryHook**（`Restart` 重跑 Task / `Stop` 整机退出）。相机线程的 `Recover` 就是"每秒重试 `Reopen()`，直到插回去或收到停止请求"。
+
+## 构建与运行
+
+```bash
+dust build       # 增量编译（-p 先清空 build 再全量）
+dust run         # 运行 build/project/vision_app
+```
+
+入口脚本在 `framework/cmd/build`（`.vscode/settings.json` 已把它加进本工作区终端 PATH）。
+每个业务线程的参数在自己的目录里，如 `project/thread/camera/trd_camera.yaml`，构建时复制到可执行文件旁；程序用 `/proc/self/exe` 定位，不依赖工作目录。改成运行目录下那份 YAML 只影响当次运行，改源码目录那份才进版本库。
+
+运行期调试台：
 
 ```text
-log list
-log on test
-log mode test on
-log off
+log list | log on camera | log on vision | log off     # DBG 默认静默，要选才出
+var list                                              # 看所有可调量（含设备范围）
+var set camera_exposure_us 3000                        # 曝光（μs）
+var set display.show 0                                 # 关本机窗口（无人值守）
 ```
 
-模式 on 为 VOFA 纯文本，off 为颜色模式；实际颜色仅在 stderr 是终端时启用。一次性四类日志不受 DBG 选择影响，不使用 log.level 配置。
+`var set camera_*` 走的是"提交给相机线程执行 SDK 写入"，不是 shell 里直接碰设备。
 
-调试台使用独立 Task 和注册式启动。Linux 使用自有格式化文本与 8×128 字节优先级帧队列；不照搬 MCU 32 位参数槽。stderr 发送是同步后端，慢输出可能阻塞，队列压力下可丢弃 DBG。调试变量与 UART/DMA 暂未移植。
+## 改代码前先看这几条
 
-stdin 与 stderr 连接同一个终端时，显示 `dust> ` 提示符，由 shell 逐字接收并回显 ASCII 命令。后台日志输出后恢复当前输入和光标，输入 `log off` 时不会再被心跳拆开。支持退格、左右方向键、Home/End、Delete、Ctrl+U；长命令横向滚动，最长 255 字节，超长整行丢弃。退出时恢复原终端设置，Ctrl+C 仍有效。重定向或 `TERM=dumb` 时保持原输入方式，不输出提示符及输入重绘序列。[Linux termios 手册](https://man7.org/linux/man-pages/man3/termios.3.html)
+1. **不许 `clone()`**：一帧的路径上 `cv::Mat` 都是浅拷贝共享像素，克隆就把"零成本共享"变成"每订阅者一份内存"；
+2. **消费者不带周期超时**（只有主线程显示带 50 ms，那是为了泵 Qt 事件，否则窗口点关闭没反应）；空闲时消费者唤醒数应为 0；
+3. **`imshow`/`waitKey` 只能在主线程**：本机 highgui 后端是 Qt5，挪到工作线程会崩；
+4. **状态声明在拥有它的线程文件里**，公共头只放类型；不用单例，跨线程用显式指针/注册交出去；
+5. **调试变量 `var` 只支持 double**（开关类量写 0/1）；
+6. **参数校验只防手滑**：硬件上下限交给设备（换相机/换分辨率才不会失效）；
+7. **MVS 运行时进程内只初始化一次**：设备没插时反复 `MV_CC_Initialize`/`MV_CC_Finalize` 会把 SDK 拖崩（实测十几次来回后段错误），所以启动等待先读 sysfs 探测设备、运行时引用不释放。
 
-平台启动先忽略 SIGPIPE。日志写入或刷新失败时保存首次错误并请求统一关闭，失效后不再反复写入该输出端。详见 [SIGPIPE 问题说明与解决方案](doc/SIGPIPE问题说明与解决方案.md)。
+## 相机接线与帧率（现场经验）
 
-历史测试曾验证运行期断管后的线程清理，以及持续心跳中的输入恢复、按键编辑、终端属性恢复和纯文本重定向。当前工程已无 `tests` 目录，根 CMake 不再装配这些测试；历史结果见对应检查文档。
+- **必须 USB3 直连**：经 USB2 拓展坞会被链路卡到 **约 24 fps**（37 MB/s 上限 vs 1440×1080 Bayer8 每帧 1.5552 MB）；
+- USB3 直连后，1440×1080 的设备上限约 **165 fps**（与曝光无关，是读出/内部吞吐），想更高只能缩 ROI 或 binning；
+- **帧周期 ≥ 曝光时间**：曝光 50 ms 时帧率必然降到 20 fps；
+- 别为了省转换让相机直出 BGR8：每帧从 1.55 MB 变 4.67 MB，带宽翻三倍、fps 反而掉。
 
-## 线程参数读取
+## 文档索引（`doc/`）
 
-`framework/cmd/config/config.hpp/.cpp` 提供 `cmd::config::Config` 类，封装文件定位、YAML 解析、字段集合及整数范围校验。各实例各自加载文件，不保存全局业务参数，不解析命令行。
-
-线程中只声明本线程参数并调用：
-
-```cpp
-cmd::config::Config yaml;
-yaml.Load("thread/test/trd_test.yaml", {"heartbeat_ms", "run_duration_ms"});
-params_.heartbeat_ms = yaml.GetInt("heartbeat_ms", 1, 60000);
-params_.run_duration_ms = yaml.GetInt("run_duration_ms", 0, 86400000);
-```
-
-YAML 仍放在对应线程目录，字段和允许范围由线程决定。
+| 文档 | 内容 |
+| --- | --- |
+| [Linux视觉基础骨架建立规划](doc/Linux视觉基础骨架建立规划.md) | 骨架与分层的由来 |
+| [相机图像出口与显示解耦规划](doc/相机图像出口与显示解耦规划.md) | 话题/订阅者模型、显示解耦与验收 |
+| [HikRobot相机模块与SDK接口说明](doc/HikRobot相机模块与SDK接口说明.md) | 相机模块对外接口与 SDK 节点用法 |
+| [HikRobot断线重连机制](doc/HikRobot断线重连机制.md) | 掉线判定与重连流程 |
+| [相机运行时线程内调参规划](doc/相机运行时线程内调参规划.md) | `var` 通知版：调参如何回到设备线程 |
+| [Var通知版注册与相机调参改造规划](doc/Var通知版注册与相机调参改造规划.md) | 上面那条的改造记录（含类型化说明） |
+| [调试台线程CPU空转问题与修改方案](doc/调试台线程CPU空转问题与修改方案.md) | shell 线程从 100 Hz 轮询改成事件驱动 |
+| [SIGPIPE问题说明与解决方案](doc/SIGPIPE问题说明与解决方案.md) | 日志断管的处理与验收 |
+| [电控架构初始化流程检查报告](doc/电控架构初始化流程检查报告.md) | 启动/关闭流程检查 |

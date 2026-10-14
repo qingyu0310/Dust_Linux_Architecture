@@ -113,7 +113,7 @@ struct VarEntry
     void*       minimum;   // 与 value 同类型的下限；空指针表示不设置
     void*       maximum;   // 与 value 同类型的上限；空指针表示不设置
     std::mutex* mutex;     // 保护数值和动态范围
-    VarSetter   setter;    // 空指针直接写变量，否则同步调用业务设置
+    VarSetter   setter;    // 空指针则直接写变量，否则同步调用业务设置
     void*       context;   // 调用方持有的设置上下文
 };
 

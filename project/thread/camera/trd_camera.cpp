@@ -58,16 +58,17 @@ struct CommandRequest
 // 调参命令槽：同一时间只允许一条命令在途。
 // shell 线程填 request_ 并 Release 信号量，然后阻塞等 condition_；
 // 相机线程在 Task 循环里 TryAcquire 取走执行，做完置 completed 再唤醒提交者。
-static Semaphore               signal_ {0};          // 计数信号量：通知相机线程有命令待执行
-static std::mutex              mutex_;                              // 保护命令槽及执行结果
-static CommandRequest          request_ {};
+static Semaphore      signal_ {0};                   // 计数信号量：通知相机线程有命令待执行
+static std::mutex     mutex_;                                       // 保护命令槽及执行结果
+static CommandRequest request_ {};
 static std::condition_variable condition_;                          // 提交者等待执行结果
 
-static HikRobot camera_ {};
 static int max_frame_gap_ms_ = 0;                                   // 连续无有效帧时限，单位 ms
 static std::atomic<bool> camera_ready_ {false};                  // 仅表示 Task 可以接受设置命令
 
-static Thread thread_ {};
+static HikRobot camera_ {};
+
+static Thread   thread_ {};
 
 /**
  * @brief 取消尚未执行的相机设置命令并唤醒 shell
@@ -212,9 +213,11 @@ bool thread_init()
     yaml.Load("thread/camera/trd_camera.yaml", {"exposure_us", "gain_db", "frame_rate", "timeout_ms", "max_frame_gap_ms"});
 
     // YAML 用 μs、HikRobot 用 ms：只在这里换算一次，两边不混用单位
-    config.exposure_ms = yaml.GetInt("exposure_us",      1,     1000000) / 1000.0;
+    // 这里的上下限只防手滑，不是硬件上限：帧率上限由分辨率/曝光/链路带宽决定，
+    // 曝光上限由设备节点决定（都靠设备自己报错或实际帧率体现，别在这儿替设备做主）
+    config.exposure_ms = yaml.GetInt("exposure_us",      1,     10000000) / 1000.0;
     config.gain        = yaml.GetInt("gain_db",          0,     48);
-    config.frame_rate  = yaml.GetInt("frame_rate",       1,     240);
+    config.frame_rate  = yaml.GetInt("frame_rate",       1,     1000);
     config.timeout_ms  = yaml.GetInt("timeout_ms",       1,     1000);
     max_frame_gap_ms_  = yaml.GetInt("max_frame_gap_ms", 1000,  60000);
 
@@ -357,6 +360,9 @@ static void Task(void*, void*, void*)
             if (thread_.StopRequested()) {
                 break;
             }
+
+            // 相机安装方向上下、左右均相反；-1 同时翻转两个轴，相当于旋转 180° 后再发布
+            cv::flip(image, image, -1);
 
             last_frame = timestamp; // 以 SDK 帧时间戳为准，本地时间只用于统计
             ++frames;

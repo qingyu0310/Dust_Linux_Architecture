@@ -3,7 +3,8 @@
 target_sources(vision_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/test/trd_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/camera/trd_camera.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/display/trd_display.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/display/trd_display.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/vision/trd_vision.cpp)
 
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/test/trd_test.yaml

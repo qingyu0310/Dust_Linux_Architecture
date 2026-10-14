@@ -44,17 +44,17 @@ static VarValue LoadValue(VarType type, const void* pointer)
     VarValue value {};
     switch (type)
     {
-        case VarType::Uint8:  value.u8  = *static_cast<const uint8_t*>(pointer);  break;
-        case VarType::Int8:   value.i8  = *static_cast<const int8_t*>(pointer);   break;
-        case VarType::Uint16: value.u16 = *static_cast<const uint16_t*>(pointer); break;
-        case VarType::Int16:  value.i16 = *static_cast<const int16_t*>(pointer);  break;
-        case VarType::Uint32: value.u32 = *static_cast<const uint32_t*>(pointer); break;
-        case VarType::Int32:  value.i32 = *static_cast<const int32_t*>(pointer);  break;
-        case VarType::Uint64: value.u64 = *static_cast<const uint64_t*>(pointer); break;
-        case VarType::Int64:  value.i64 = *static_cast<const int64_t*>(pointer);  break;
-        case VarType::Float:  value.f   = *static_cast<const float*>(pointer);    break;
-        case VarType::Double: value.d   = *static_cast<const double*>(pointer);   break;
-        case VarType::Bool:   value.b   = *static_cast<const bool*>(pointer);     break;
+        case VarType::Uint8:  value.u8  = *static_cast<const uint8_t*> (pointer);   break;
+        case VarType::Int8:   value.i8  = *static_cast<const int8_t*>  (pointer);   break;
+        case VarType::Uint16: value.u16 = *static_cast<const uint16_t*>(pointer);   break;
+        case VarType::Int16:  value.i16 = *static_cast<const int16_t*> (pointer);   break;
+        case VarType::Uint32: value.u32 = *static_cast<const uint32_t*>(pointer);   break;
+        case VarType::Int32:  value.i32 = *static_cast<const int32_t*> (pointer);   break;
+        case VarType::Uint64: value.u64 = *static_cast<const uint64_t*>(pointer);   break;
+        case VarType::Int64:  value.i64 = *static_cast<const int64_t*> (pointer);   break;
+        case VarType::Float:  value.f   = *static_cast<const float*>   (pointer);   break;
+        case VarType::Double: value.d   = *static_cast<const double*>  (pointer);   break;
+        case VarType::Bool:   value.b   = *static_cast<const bool*>    (pointer);   break;
     }
     return value;
 }
