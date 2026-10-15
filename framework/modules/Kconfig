@@ -1,0 +1,8 @@
+# modules/Kconfig —— 设备模块能力（在 driver/topic 之上）。
+# 架构层能力默认 n，由业务层 select 拉起。
+
+config DUST_MOD_DEV_HIKROBOT
+    bool "HikRobot MVS camera module"
+    default n
+    help
+      HikRobot MVS camera module: device capability only, no thread and no config.

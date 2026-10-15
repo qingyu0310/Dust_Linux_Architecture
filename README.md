@@ -1,8 +1,8 @@
 # Dust Vision
 
-Dust Vision 是一个面向 Linux 的原生 C++17 机器人视觉程序，当前主要用于读取海康工业相机图像、通过 TensorRT YOLO 模型检测 RoboMaster 装甲板，并显示检测结果。工程同时提供轻量的组件初始化/线程生命周期管理、进程内消息通道、YAML 配置和运行时调试 shell。
+Dust Vision 是一个面向 Linux 的原生 C++17 机器人视觉程序，当前主要用于读取海康工业相机图像、通过 TensorRT YOLO 模型检测 RoboMaster 装甲板，并显示检测结果。工程同时提供轻量的组件初始化/线程生命周期管理、进程内消息通道、Kconfig 构建期功能选择、每线程 YAML 配置和运行时调试 shell。
 
-当前运行主链是**单帧二维装甲板检测与显示**。PnP/距离估计、跨帧跟踪、目标锁定与切换、云台控制和自动开火尚未接入；`ArmorRefiner` 已实现但尚未接入主链。`mujoco/` 目录是独立内容，不参与根 CMake 构建。
+当前运行主链是**单帧二维装甲板检测与显示**。PnP/距离估计、跨帧跟踪、目标锁定与切换、云台控制和自动开火尚未接入；`ArmorRefiner` 是编译期可开关的局部灯条角点精修，是否编进程序由 Kconfig 决定。`temp/` 下是参考工程与资料，不参与根 CMake 构建。
 
 ## 当前数据流
 
@@ -21,19 +21,25 @@ Dust Vision 是一个面向 Linux 的原生 C++17 机器人视觉程序，当前
 ## 架构分层
 
 ```text
-project/                  本项目的业务装配
-└── thread/               相机、识别、显示等业务线程
-framework/                可复用基础设施与算法
-├── init/                 组件注册、启动阶段、线程生命周期和关闭
-├── cmd/                  YAML 配置、日志、shell、运行时变量
-├── topic/                线程间消息通道和消息类型
-├── modules/              可复用设备/功能模块，如 HikRobot 相机
-├── drivers/              更底层的设备和通信驱动
-└── algorithm/            与线程、设备 I/O 解耦的算法
+Kconfig                    构建期功能选择的描述文件（根 + 各层）
+scripts/kconfig.py         Kconfig 前端：求值并生成 .config / kconfig.cmake / autoconf.h
+framework/                 可复用基础设施与算法
+├── init/                  组件注册、启动阶段、线程生命周期和关闭
+├── cmd/                   控制台线程、日志、运行时变量、YAML 配置读取
+├── topic/                 线程间消息通道和消息类型
+├── modules/               可复用设备/功能模块，如 HikRobot 相机
+├── drivers/               更底层的设备和通信驱动（当前尚无源文件）
+└── algorithm/             与线程、设备 I/O 解耦的算法
+    ├── filter/            滤波估计（Kalman / EKF、四元数姿态）
+    ├── math/              基础数学工具
     └── vision/
-        ├── core/         视觉领域类型、结果契约和几何工具
-        ├── detect/       图像检测器和模型输出解码
-        └── refine/       检测结果的可选局部角点精修
+        ├── core/          视觉领域类型、结果契约和几何工具
+        ├── detect/        图像检测器和模型输出解码
+        └── refine/        检测结果的可选局部角点精修
+project/                   本项目的业务装配
+├── Kconfig                业务门禁与使用开关
+├── thread/                相机、测试、识别、显示等业务线程（每个线程一份 YAML）
+└── CMakeLists.txt         业务工程装配入口
 ```
 
 ### 各层的含义
@@ -50,11 +56,11 @@ framework/                可复用基础设施与算法
 
 ### 大分层：每一块为什么独立存在
 
-上面的目录不是简单按“文件类型”分类，而是把系统拆成**业务装配、可复用能力、数据交换、系统治理**四类职责。理解这四类，新增代码时就知道该落在哪一层：
+上面的目录不是简单按“文件类型”分类，而是把系统拆成**业务装配、可复用能力、数据交换、系统治理、构建期选择**五类职责。理解这几类，新增代码时就知道该落在哪一层：
 
 #### `project/`：应用层，回答“这个机器人当前要怎么工作”
 
-`project/` 放本项目的具体业务组合。当前 `project/thread/` 把相机模块、视觉算法、YAML 参数和 topic 接起来：相机线程采图并发布，视觉线程订阅并检测，显示逻辑消费检测结果。它是应用的“胶水层”和策略编排层，不是通用算法库。
+`project/` 放本项目的具体业务组合。当前 `project/thread/` 把相机模块、视觉算法、YAML 参数和 topic 接起来：相机线程采图并发布，视觉线程订阅并检测，显示线程消费检测结果。它是应用的“胶水层”和策略编排层，不是通用算法库。
 
 当业务流程变化时，例如增加跟踪、切换目标，通常由应用线程决定何时调用对应模块、结果发往哪里；跟踪算法本身不应该直接塞到相机 SDK 或 detector 内部。这样同一个算法可以被离线工具、仿真入口或其他业务流程复用。
 
@@ -62,7 +68,7 @@ framework/                可复用基础设施与算法
 
 `framework/` 是多个业务组件可共享的基础设施和算法。它内部不是单一层，而是各自有边界的子系统：
 
-- `framework/algorithm/`：数学、控制、滤波、观测和视觉算法。它应尽量接收明确输入并返回明确结果，不依赖当前业务线程、设备句柄或 GUI。当前除了 `vision/`，还包含 `controller/`、`filter/`、`math/`、`observer/` 等算法目录。
+- `framework/algorithm/`：数学、滤波和视觉算法。它应尽量接收明确输入并返回明确结果，不依赖当前业务线程、设备句柄或 GUI。当前包含 `filter/`（Kalman、EKF、四元数姿态）、`math/`（角度工具）和 `vision/`（检测与精修）。
 - `framework/modules/`：面向业务使用的功能模块，封装一项相对完整的可复用能力。当前已落地的是 `modules/camera/hikrobot.*`，它把 MVS SDK 的设备探测、初始化、取帧和释放收进相机模块；业务层不需要在多个线程里重复处理 SDK 细节。
 - `framework/drivers/`：预留给更底层、偏协议或硬件访问的驱动适配。当前该目录尚无实际源文件，因此 README 描述的是架构边界，不表示已经实现了某种串口/总线驱动。
 - `framework/topic/`：进程内的数据交换层。它定义“谁发布什么消息、消费者如何独立读取、关闭时如何唤醒”，使生产者不需要知道所有消费者的存在。
@@ -70,6 +76,10 @@ framework/                可复用基础设施与算法
 - `framework/init/`：应用级生命周期协调器。它不执行业务算法，而是收集组件声明的初始化/线程回调，统一安排阶段、优先级、停止、join 和逆序清理。
 
 可以把几种常被混淆的角色这样区分：**driver 接近设备协议，module 提供业务可用的设备能力，thread 组织运行流程，algorithm 负责计算，topic 传递数据，init 管理生命周期，cmd 提供运维/调试入口。** 例如 `HikRobot` 是 module；运行它的相机线程是 project；二者之间的帧通过 topic 交接；相机线程何时创建和销毁由 init 统一调度。
+
+#### `Kconfig`：构建期选择，回答“这次构建要哪些代码”
+
+功能开关不写进 CMake option，而是写在 Kconfig 文件里：根 `Kconfig` 引入各层描述文件，`scripts/kconfig.py` 求值得到确定结果，CMake 只消费结果。分层规则见[构建期功能选择](#构建期功能选择kconfig-链路)。
 
 #### `framework/init/`：不是“初始化函数集合”，而是生命周期架构
 
@@ -87,7 +97,7 @@ module 持有并封装一个可复用能力的实现细节，例如设备句柄�
 
 算法库应尽量能通过一组输入、输出、配置独立理解。以视觉为例，`ArmorDetector::Detect(image)` 不创建窗口、不订阅 topic、不知道相机线程在哪里；它只执行模型相关计算并返回结构化结果。线程负责把它放进实时数据流。
 
-其它算法目录也遵循相同目标：`math/` 是基础数学工具，`filter/` 处理滤波估计，`controller/` 放控制算法，`observer/` 放观测器。把它们与线程隔开后，可以单独调整算法或建立离线验证入口；算法不必依赖某一个具体设备和进程启动方式。
+其它算法目录也遵循相同目标：`math/` 是基础数学工具，`filter/` 处理滤波估计。把它们与线程隔开后，可以单独调整算法或建立离线验证入口；算法不必依赖某一个具体设备和进程启动方式。
 
 #### `framework/topic/`：显式的数据边界，而非随手共享的全局变量
 
@@ -102,6 +112,8 @@ topic 的核心价值是契约与所有权：消息结构定义边界字段，Ch
                     │ 统一调度组件创建、线程启动与退出清理     │
                     └─────────────────────────────────────────┘
 
+Kconfig ──求值──> .config ──生成──> kconfig.cmake / autoconf.h ──> CMake 目标与编译宏
+
 project/thread ──调用──> framework/modules + framework/algorithm
       │                              │
       └──────────发布/订阅──────────> framework/topic
@@ -110,7 +122,7 @@ framework/cmd 提供通用 YAML、日志、shell、运行时变量能力
 modules 可使用 drivers；算法与业务线程不反向依赖 project
 ```
 
-依赖关系的目标是：应用层可以组合基础能力，但基础能力不认识应用层。这样才有真正的替换空间——仅仅把代码分到不同目录，而互相 include、直接修改对方全局状态，并不算完成分层。
+依赖关系的目标是：应用层可以组合基础能力，但基础能力不认识应用层。构建期同理：业务开关 select 架构能力，架构层不认识具体业务。
 
 `core/`、`detect/`、`refine/` 是视觉算法内部的职责分层：`core` 定义共同语言，`detect` 从图像产生候选，`refine` 在候选基础上做可选修正。当前 `DetectedArmor` 表示一帧中的二维检测结果，不是跟踪目标或三维位姿。
 
@@ -118,6 +130,13 @@ modules 可使用 drivers；算法与业务线程不反向依赖 project
 
 | 文件/目录 | 在当前工程中的位置 |
 | --- | --- |
+| `Kconfig` | 构建期功能选择入口，`source` 各层 Kconfig 与 `project/Kconfig` |
+| `scripts/kconfig.py` | Kconfig 前端：解析、求值，生成 `.config`、`kconfig.cmake`、`autoconf.h` |
+| `framework/algorithm/Kconfig` | 算法能力符号（`DUST_VISION_YOLO`、`DUST_VISION_YOLO_REFINER`、`DUST_FLT_*`、`DUST_MATH_ANGLE`） |
+| `framework/cmd/Kconfig` | 控制台、日志、变量与 YAML 配置读取能力符号 |
+| `framework/topic/Kconfig` | 话题通道能力符号 |
+| `framework/modules/Kconfig` | 设备模块能力符号（`DUST_MOD_DEV_HIKROBOT`） |
+| `project/Kconfig` | 业务门禁与使用开关（`USE_*` / `TRD_*`），靠 `select` 拉起架构能力 |
 | `framework/init/main.cpp` | 进程入口，只负责调用统一启动、等待和关闭流程，不放业务逻辑 |
 | `framework/init/` | `REGISTER_INIT` / `REGISTER_THREAD`、阶段顺序、失败清理和线程停止/join |
 | `framework/cmd/config/` | YAML 文件加载、必需字段/未知字段检查和带范围的类型读取 |
@@ -129,97 +148,68 @@ modules 可使用 drivers；算法与业务线程不反向依赖 project
 | `framework/algorithm/vision/core/` | `DetectedArmor`、颜色/尺寸/标签枚举、几何校验和精修使用的灯条类型 |
 | `framework/algorithm/vision/detect/` | TensorRT 检测器、预处理/推理/后处理和模型类别映射 |
 | `framework/algorithm/vision/refine/` | 给定 YOLO 粗四点后的可选局部灯条提取与角点细化 |
-| `project/thread/camera/` | 读取相机线程 YAML，控制相机生命周期并发布 `camera_to` |
-| `project/thread/vision/` | 订阅帧、调用检测器、汇总统计并发布 `vision_to` |
-| `project/thread/display/` | 主线程订阅结果、绘制检测信息并处理 OpenCV 窗口事件 |
-| `project/thread/*/CMakeLists.txt` | 业务线程源文件加入可执行程序，并复制各线程 YAML |
-| `framework/CMakeLists.txt` | 定义算法、topic、core 与 modules 等库及其依赖 |
+| `project/thread/CMakeLists.txt` | 业务线程源文件加入可执行程序，并把各线程 YAML 复制到可执行文件旁 |
 | `project/CMakeLists.txt` | 创建最终 `vision_app`，链接框架库并配置链接脚本/运行库路径 |
+| `framework/CMakeLists.txt` | 按 `CONFIG_*` 装配算法、topic、core 与 modules 各库 |
+| `framework/cmd/build/` | 构建与运行脚本（`dust`、`build.sh`、`run.sh`） |
 
 `framework/` 和 `project/` 的依赖方向原则上是：**基础设施/算法供业务线程使用，而不是反过来依赖业务线程**。例如 `ArmorDetector` 不应 include `trd_vision.cpp`；相机模块不应知道 `vision_to`；线程负责把独立模块连接起来。
 
-## 这套架构的设计优势
+## 构建期功能选择（Kconfig 链路）
 
-这里的“架构优势”不是目录多，而是把实时视觉程序里容易互相缠绕的职责拆开，并且每个边界都有具体实现：
+### 文件与分层
 
-### 1. 生命周期集中管理，业务模块只声明自己
-
-新增相机、识别器或其他业务组件时，组件在自身源文件注册初始化/线程回调，统一启动器负责按阶段调度。启动器不需要维护一份不断增长的手写初始化大函数；组件也不需要自行猜测“另一个线程是否已经初始化”。
-
-初始化项可声明阶段、同阶段优先级和失败策略；线程项把 start、request-stop、join 分开。退出时框架先逆序通知线程停止，再逆序 join，最后逆序释放初始化资源。初始化中途失败时，框架仍会清理已经成功初始化的项目，因此关闭逻辑不是每个业务线程各自拼出来的。
-
-这个设计适合设备与算法逐步增加的项目：注册描述“组件归属和生命周期”，而不是把业务流程塞到 `main()`。同时它有一个明确的构建约束：注册对象必须链接进最终程序，项目 CMake 和链接脚本负责把注册源及注册段保留下来。
-
-### 2. 最新帧通道针对实时性做了明确取舍
-
-视觉处理通常更关心“现在看到什么”，而不是把已经过时的每一帧都排队处理。`topic::Channel` 采用单槽最新消息：生产者覆盖旧值，消费者有各自独立游标，慢消费者跳过积压帧。这样采集、识别和显示互不抢读者，且消费延迟不会因为队列积压而不断增长。
-
-这一取舍是显式的，而不是隐藏的：它适用于相机帧、遥测快照等“最新状态”数据；不适用于必须逐条执行的命令、交易或事件日志。通道同时提供 `Close()` 唤醒阻塞等待者、`Clear()` 清除旧槽内容等生命周期操作，断线重连和关机不必靠轮询碰运气。
-
-### 3. 图像和检测结果按同一帧成组传递
-
-视觉线程发布的不只是装甲板列表，还包括源图像和采集时间戳。显示端收到的是检测实际使用的那一帧，而不是另外订阅一条可能时间不同的图像流。这让结果可视化、帧龄统计以及未来的离线重放有清晰的数据关联基础。
-
-消息契约也把算法和消费端隔开：检测器不关心窗口如何画，显示端不需要理解 TensorRT 输出张量；后续若接入跟踪或位姿估计，可以通过明确的结果类型/通道扩展，而不是让模块互相 include 对方的线程实现。
-
-### 4. 算法可以独立演进，硬件细节不会渗入识别逻辑
-
-`ArmorDetector` 接受图像并返回检测结果；相机模块处理 MVS 设备和 SDK；业务线程把相机、检测器、通道串起来。这样的边界让模型后处理可以单独修改，也让设备断线恢复不会侵入模型解码代码。视觉结果类型集中在 `core/`，模型私有类别顺序则由 `model_decode` 映射成稳定的工程枚举。
-
-这也为后续引入 PnP、跟踪和目标选择留出自然位置：二维观测、三维位姿、跨帧状态属于不同层次，可以各自定义输入、输出和有效性，而不必把所有字段都塞进 `DetectedArmor`。
-
-### 5. 相机调参走受控命令路径
-
-运行时 shell 不是直接从 shell 线程调用 MVS SDK。参数变更通过通知回调提交给相机线程，由设备所有者线程执行设备操作，减少多个线程同时碰相机句柄的风险。变量可以带范围校验，并能在运行时读取和调整；线程配置仍从 YAML 在初始化阶段加载，静态配置与运行时调参职责分开。
-
-### 6. 失败路径与正常路径一样被设计
-
-设备未连接、连续无帧、线程等待通道、部分初始化失败和全局退出都有对应的清理/唤醒机制。以相机恢复为例，重连前清除旧帧槽，避免恢复后消费者误用断线前画面；关闭相机通道会唤醒等待中的识别线程；统一 shutdown 再等待线程退出后释放检测器和设备资源。
-
-对机器人程序来说，这一点比“能在理想情况下跑通”更关键：资源所有权、等待退出和错误传播都在架构里有落点，而不是寄希望于进程退出时操作系统替程序收拾所有事情。
-
-### 7. 工程保持轻量、原生、依赖关系可见
-
-主程序是原生 Linux/C++17 工程，线程间通信是进程内 C++ 通道；当前主链不需要 ROS 2 节点图、消息中间件或额外 broker。CMake 显式列出源文件、库依赖和 SDK/engine 要求，依赖缺失时配置阶段会给出错误，而不是运行到某个深层路径才发现模型或库不存在。
-
-轻量不意味着所有功能都已经完成：当前交付范围仍是相机采集、YOLO 单帧检测和显示。目标跟踪、颜色策略、锁定切换、PnP、预测和云台控制属于后续功能，应该沿用这些边界逐层增加，并通过数据验证，而不是宣传成现成功能。
-
-### 这些优势如何体现在开发效率上
-
-| 变更 | 通常只需要触及 | 不应被迫修改 |
+| 文件 | 符号 | 谁改它 |
 | --- | --- | --- |
-| 调模型阈值/后处理 | vision 配置读取、`detect/` | 相机 SDK、启动器、显示窗口实现 |
-| 更换相机设备实现 | camera module、相机线程适配 | 模型输出解码、装甲几何类型 |
-| 增加结果消费者 | 新消费者线程和消息订阅 | 检测器内部推理流程 |
-| 增加纯算法步骤 | algorithm 模块和其调用点 | shell、相机硬件接口 |
-| 调整运行时曝光 | shell 变量回调、相机线程命令处理 | 识别算法线程直接操作设备 |
+| `Kconfig` | `PRJ_MAIN` 总门禁 | 维护者 |
+| `framework/algorithm/Kconfig` | `DUST_VISION_YOLO`、`DUST_VISION_YOLO_REFINER`、`DUST_FLT_*`、`DUST_MATH_ANGLE` | 架构层 |
+| `framework/cmd/Kconfig` | `DUST_CMD_SHELL`、`DUST_CMD_SHELL_LOG`、`DUST_CMD_SHELL_VAR`、`DUST_CMD_CONFIG` | 架构层 |
+| `framework/topic/Kconfig` | `DUST_TPC_CAMERA_TO`、`DUST_TPC_VISION_TO` | 架构层 |
+| `framework/modules/Kconfig` | `DUST_MOD_DEV_HIKROBOT` | 架构层 |
+| `project/Kconfig` | `USE_CMD_SHELL`、`USE_CMD_CONFIG`、`TRD_CAMERA`、`TRD_TEST`、`TRD_VISION`、`TRD_DISPLAY` | 业务层 |
 
-这不是保证任意改动都只改一个文件，而是希望改动沿明确的边界传播：更新消息契约时同步更新生产者和消费者；更换算法时不重写硬件；更换硬件适配时不重写算法。
+规则：
 
-### 一条图像消息是如何走完的
+- **架构层 `DUST_*` 默认 `n`**：不显式启用就不进镜像，也不去找它的外部依赖。
+- **业务层用 `select` 拉起架构能力**，不在别处硬写 `CONFIG_DUST_*=y`；业务线程自己的开关用 `TRD_*`，通用使用开关用 `USE_*`。
+- 依赖写在 Kconfig 里（例如 `TRD_DISPLAY` 依赖 `TRD_VISION`），依赖不满足时符号被置 `n`，对应源文件不会编进程序。
+- 业务符号保持原名、不带 `DUST_` 前缀；被 select 的架构符号统一 `DUST_` 前缀。
 
-1. 相机线程取得一帧并构造 `camera_to::Message`，其中包含图像和采集时刻。
-2. `camera_to` 发布覆盖槽内旧消息。每个消费者自己的 `Subscriber` 独立记录序号，因此识别线程和显示/调试消费者不会互相“抢走”同一条消息。
-3. 视觉线程阻塞等待新帧。检测耗时超过相机帧间隔时，它消费最新帧而跳过中间旧帧，优先降低图像新鲜度延迟，而不是保证逐帧处理。
-4. `ArmorDetector::Detect()` 同步完成预处理、TensorRT 执行和后处理，结果中的四角点已经映射到输入原图的像素坐标。
-5. 视觉线程将同一帧的图像、时间戳、检测列表和处理耗时组成 `vision_to::Message` 发布。
-6. 显示回调从自己的订阅者读取该消息，绘制到对应原图的副本，再调用 HighGUI 显示。窗口操作由主线程执行。
+### 求值与生成
 
-`Channel` 的锁保护槽消息对象、序号和关闭标志，但不保护消息中共享像素的后续原地写入。发布后应把图像视为只读；若生产者或消费者要改像素，先拥有独立副本。需要无损消费每一条消息的业务不能使用“深度为 1 的最新值通道”，应设计有界队列并定义满队列策略。
-
-### 当前视觉算法做什么、不做什么
+配置阶段由根 CMake 调用 `scripts/kconfig.py`（纯 Python 标准库，不需要 kconfiglib）：解析 Kconfig 树 → 按 `select` / `depends on` / `default` 求值 → 生成
 
 ```text
-原始 BGR 帧
- → 等比例缩放并放入 640×640 输入画布
- → TensorRT 0526 engine 推理，输出 25200 行、每行 22 个值
- → objectness 初筛、坐标逆变换、有限值和基础框几何检查
- → NMS 去重
- → 终选置信度、颜色、标签/尺寸一致性和四边形验证
- → DetectedArmor::Create 建立通过契约校验的单帧检测结果
+build/kconfig/.config         规范化结果（含 "# CONFIG_X is not set"）
+build/kconfig/kconfig.cmake   set(CONFIG_X ON/OFF)，供 CMake 消费
+build/kconfig/autoconf.h      #define CONFIG_X 1，强制 include 给所有编译单元
 ```
 
-这里的阈值筛选不是跨帧“目标选择”。颜色/标签是模型输出解码，`DetectedArmor` 只表达本帧识别到的一个装甲板。当前没有“这是上一帧同一个目标”的 ID，也没有三维位置或云台目标角度。`ArmorRefiner` 只尝试在粗检测附近重定位灯条端点；它不负责识别敌我、目标锁定或距离估计。展开解释见[视觉识别流程说明](doc/framework视觉识别流程说明.md)。
+CMake 侧只用结果：`include(kconfig.cmake)` 得到 `CONFIG_*`，`-include autoconf.h` 让 C++ 侧看见同一个符号。装配动作按层分工：
+
+- `project/thread/CMakeLists.txt`：`TRD_*` 决定哪些业务线程源文件进 `vision_app`；
+- `framework/CMakeLists.txt`：`DUST_*` 决定 `framework_core` / `framework_vision` 的源文件与依赖；
+- `framework/modules/CMakeLists.txt`：`DUST_MOD_DEV_HIKROBOT` 决定是否查找 MVS SDK；
+- 根 `CMakeLists.txt`：`DUST_VISION_YOLO` 决定是否查找 CUDA/TensorRT 与 OpenCV dnn。
+
+求值失败（例如依赖不满足却要求 `=y`）会在配置阶段直接报错，不会带着半套配置往下走。
+
+### 用哪份配置构建
+
+默认直接用 Kconfig 文件里的 `default`。要另一套组合时，给它一份已存在的 `.config`：
+
+```bash
+cmake -S . -B build -DKCONFIG_CONFIG=/absolute/path/to/.config
+```
+
+### 改动开关时的落点
+
+| 你要做的事情 | 改哪里 |
+| --- | --- |
+| 新增一个架构能力 | 对应层的 `Kconfig` 加 `DUST_*`（`default n`），并在该层 CMake 里按它裁源文件 |
+| 新增一个业务线程 | `project/Kconfig` 加 `TRD_*`（`default y`，按需要 `select` 架构能力），`project/thread/CMakeLists.txt` 加条件源文件 |
+| 新增一个通用使用开关 | `project/Kconfig` 的“使用开关”分区加 `USE_*`，照同族符号的写法 `select` 架构能力 |
+| 关闭某项功能 | 改 Kconfig 里的 `default`，或给它一份 `.config` |
 
 ## 启动与线程生命周期
 
@@ -253,7 +243,8 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 3. **把硬件操作留在模块/驱动层。** SDK、串口和设备重连细节不要散落到业务算法中。
 4. **在线程层编排。** 在 `project/thread/` 读取本线程配置、订阅输入 topic、调用模块/算法、发布结果；始终定义停止和阻塞唤醒行为。
 5. **注册生命周期。** 新增初始化或线程时，使用现有注册机制，并在相应 CMake `target_sources` 中加入源文件。确认注册源直接进入最终可执行程序，避免静态库链接时被裁掉。
-6. **配置与验证。** 线程 YAML 放在所属线程目录，并在对应 CMake 中用 `configure_file(... COPYONLY)` 复制到运行目录；配置必须校验必需字段、类型和值域。为算法逻辑增加可重复的离线样例或测试，设备相关验证单独标明硬件前提。
+6. **补构建期开关。** 架构能力写进所属层 `Kconfig`，业务线程写进 `project/Kconfig`；默认值保持与当前行为一致。
+7. **配置与验证。** 线程 YAML 放在所属线程目录，构建时复制到可执行文件旁；配置必须校验必需字段、类型和值域。为算法逻辑增加可重复的离线样例或测试，设备相关验证单独标明硬件前提。
 
 ### 以当前视觉链为例
 
@@ -261,7 +252,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 - 增加检测结果字段：先判断字段属于单帧检测、位姿还是跨帧目标；更新对应结果契约及消费者，不要把跟踪状态直接塞进 `DetectedArmor`。
 - 增加跨线程输出：定义明确消息并确认发布者、订阅者和通道关闭行为；沿用同帧图像与采集时间戳的关联原则。
 - 增加线程参数：放到对应线程 YAML，通过 `cmd::config::Config` 加载并验证；不要让算法模块自行到处读取 YAML。
-- 新增算法源文件：同时更新相关 `CMakeLists.txt`。本项目不是靠扫描目录自动编译。
+- 新增算法源文件：同时更新相关 `CMakeLists.txt`（并考虑是否需要新的 `CONFIG_*` 条件）。本项目不是靠扫描目录自动编译。
 
 开发新功能前建议先读：`project/thread/vision/trd_vision.cpp`（线程编排）、`framework/topic/vision_to/vision_to.hpp`（消息契约）、`framework/algorithm/vision/detect/armor_detector.hpp`（算法接口）和同目录 CMake 文件（构建接入）。
 
@@ -277,6 +268,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 | 增加可调参数 | 对应业务线程 YAML + 线程初始化读取 | 颜色策略、检测配置或超时参数 |
 | 增加通用运行时命令 | `framework/cmd/` | 与具体设备/算法无关的 shell 能力 |
 | 改变启动/停止行为 | `framework/init/` 与注册调用处 | 新的初始化阶段或生命周期动作 |
+| 增删一个功能开关 | 对应层 `Kconfig`（+ 该层 CMake 条件） | 新线程、新算法能力、新设备模块 |
 
 一个实用判断方式：如果函数可以拿固定输入离线调用并验证，优先放算法层；如果代码在调用 MVS/CUDA/串口等外部接口，放驱动或模块；如果代码决定“何时调用谁、数据发给谁”，放业务线程。
 
@@ -295,11 +287,12 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 
 ### YAML 配置接入流程
 
-1. 把配置放到拥有该功能的线程目录，如 `project/thread/vision/trd_vision.yaml`（若将来创建视觉线程配置）。
-2. 在对应 `CMakeLists.txt` 中显式添加 `configure_file(source destination COPYONLY)`，让配置出现在运行目录。
+1. 把配置放到拥有该功能的线程目录，如 `project/thread/vision/trd_vision.yaml`。
+2. 构建时该文件会被复制到可执行文件旁（`build/project/thread/<线程>/`），程序按“`DUST_CONFIG_ROOT` 指定的配置根，未设置时可执行文件目录”解析相对路径。
 3. 初始化时使用 `cmd::config::Config::Load(path, {必需字段...})`。当前 Config 会检查必需字段、未知字段和重复字段；读取 API 对类型和值域做验证。
 4. 将验证后的值拷贝到业务配置结构，再创建算法/模块。不要让处理每帧的热路径反复读 YAML。
-5. 配置注释写明单位、边界含义、是否重启生效和对行为/实时性的影响。相对路径以可执行文件目录为基准。
+5. 配置注释写明单位、边界含义、是否重启生效和对行为/实时性的影响。
+6. 编译期开关只决定“有没有这段代码”，运行期 YAML 只决定“这次用什么参数”；不要用 YAML 字段代替构建期裁剪，也不要让构建期开关去否决 YAML 里合法存在的参数。
 
 ### 增加跨线程消息的检查项
 
@@ -312,7 +305,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 
 ### 调试与定位建议
 
-1. 先确认线程是否启动、配置是否加载、资源是否初始化成功；看启动日志和异常提示。
+1. 先看配置阶段输出：Kconfig 求值结果、CUDA/TensorRT 版本、最终 `CONFIG_*`；再确认线程是否启动、配置是否加载、资源是否初始化成功。
 2. 再确认 topic 发布计数、消费者是否取到消息、时间戳是否持续更新；区分“没帧”和“算法没检出”。
 3. 视觉问题先固定一帧/视频离线复现，分别观察原图、预处理输入、模型输出统计、NMS 后结果和最终 `DetectedArmor`。
 4. 性能问题分别记录预处理、推理、后处理、帧龄；不要只看总 FPS 推断瓶颈。
@@ -341,6 +334,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 - **函数实现的说明注释放在函数实现所在的 `.cpp`，紧挨实现；不要为了放注释而把实现搬进 `.hpp`。** 头文件只在声明附近保留理解接口所必需的简短契约说明。
 - 注释解释“为什么这样做”、坐标/单位/线程约束、失败和回退语义；不要逐行翻译代码。
 - 配置项注释写清单位、范围、默认值含义和运行影响；坐标、角点顺序、时间戳基准必须明确注明。
+- Kconfig 符号的 `help` 写清“打开它会编译/链接什么”，不要在 `help` 里写实现原理。
 - 代码变更时同步维护过时注释和文档，但避免添加与代码重复且容易失效的大段注释。
 - 文件头按同目录现有格式写 `@file` 和简短 `@brief`；不要为了新文件复制无关历史信息或臆造版本/作者字段。
 - 注释用中文或英文均可，但同一文件/模块保持一致；术语、单位和缩写首次出现时写清楚。
@@ -366,21 +360,40 @@ ArmorDetectionResult ArmorDetector::Detect(const cv::Mat& bgr_image)
 
 ## 当前视觉检测说明
 
-当前检测主链使用 TensorRT 10 加载 0526 engine：图像等比例缩放并放入 `640×640` 画布，模型输出候选经 objectness 门限、角点坐标映射、NMS、颜色/标签/尺寸解码和几何校验后，生成 `DetectedArmor`。显示置信度是 objectness，不代表角点精度或类别分支概率。详细流程见[视觉识别流程说明](doc/framework视觉识别流程说明.md)。
+当前检测主链使用 TensorRT 10 加载 0526 engine：图像等比例缩放并放入 `640×640` 画布，模型输出候选经 objectness 门限、角点坐标映射、NMS、颜色/标签/尺寸解码和几何校验后，生成 `DetectedArmor`。显示置信度是 objectness，不代表角点精度或类别分支概率。
+
+局部灯条精修（`ArmorRefiner`）由构建期开关 `DUST_VISION_YOLO_REFINER` 决定是否编进程序：编进来就生效，YAML 里必须给出六个精修参数；没编进来时这些字段允许存在但不参与运行。详细流程见[视觉识别流程说明](doc/framework视觉识别流程说明.md)，构建期开关见[Kconfig 构建链路引入规划](doc/Kconfig构建链路引入规划.md)。
 
 ## 配置、构建与运行
 
-每个业务线程维护自己的 YAML，源配置放在 `project/thread/<线程>/`，构建时复制到可执行程序运行目录。运行时相对路径以可执行文件目录为基准；直接改构建目录的副本只影响当前构建，持久改动应修改源 YAML 后重新构建。
+### 依赖
 
-根 CMake 当前依赖 C++17、CMake 3.16+、pthread、Eigen3、OpenCV（core/highgui/imgproc/dnn）、yaml-cpp、CUDA Toolkit 12+、TensorRT 10.x 和完整海康 MVS SDK（包含 USB3 transport 库）。默认从项目 `.venv/` 查找 CUDA/TensorRT；engine 默认是 `build/0526.engine`，可通过 `ARMOR_ENGINE_PATH` 指定；MVS SDK 根目录可通过 `HIKROBOT_MVS_ROOT` 指定。缺少依赖或 engine 时，配置阶段会失败。
+根 CMake 当前依赖 C++17、CMake 3.16+、Python 3（运行 Kconfig 前端）、pthread、Eigen3、OpenCV（core/highgui/imgproc/dnn）、yaml-cpp、CUDA Toolkit 12+、TensorRT 10.x 和完整海康 MVS SDK（包含 USB3 transport 库）。CUDA/TensorRT 默认从项目 `.venv/` 查找；MVS SDK 根目录可用 `HIKROBOT_MVS_ROOT` 指定。只有 `DUST_VISION_YOLO` 打开时才会去找 CUDA/TensorRT 与 OpenCV dnn。
+
+### 构建
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build
 cmake --build build --parallel
-./build/project/vision_app
 ```
 
-运行需要可用的 MVS SDK、CUDA/TensorRT 动态库和海康相机；OpenCV 窗口显示需要图形桌面。构建/运行脚本位于 `framework/cmd/build/`。
+配置阶段会先跑 Kconfig 前端，打印各符号结果，并生成 `build/kconfig/` 下的三份文件。也可以直接用仓库自带的脚本（`framework/cmd/build/`）：
+
+```bash
+dust build        # 等价于上面的配置 + 构建
+dust run          # 运行 build/project/vision_app
+```
+
+### 运行配置
+
+每个业务线程维护自己的 YAML，源文件在 `project/thread/<线程>/`。构建时它们会被复制到可执行文件旁（`build/project/thread/<线程>/`），因此直接运行即可加载；若要让程序改用别处的配置，设置 `DUST_CONFIG_ROOT` 指向包含 `thread/` 的配置根（源码树中可指向 `<repo>/project`），相对路径会以它为基准。视觉模型的 `engine_path` 写在 `trd_vision.yaml` 里，必须是能直接打开的路径，不由 CMake 生成或复制。
+
+```bash
+./build/project/vision_app
+DUST_CONFIG_ROOT="$PWD/project" ./build/project/vision_app
+```
+
+运行需要可用的 MVS SDK、CUDA/TensorRT 动态库和海康相机；OpenCV 窗口显示需要图形桌面。
 
 运行时可在 `dust>` shell 查看日志和变量，例如：
 
@@ -391,22 +404,26 @@ var list
 var set display.show 0
 ```
 
-### 常见构建问题
+### 常见构建/运行问题
 
 | 现象 | 优先检查 |
 | --- | --- |
-| CMake 找不到 CUDA/TensorRT | `.venv/` 是否包含匹配的 Toolkit、TensorRT 头文件和 `nvinfer`；必要时设置 `DUST_DEPENDENCY_ROOT` / `CUDAToolkit_ROOT` |
+| 配置阶段报 Kconfig 求值失败 | 报错会给出符号和出处；多半是依赖不满足却要求 `=y`，或符号名拼错 |
+| `CONFIG_*` 没生效 | 生成目录 `build/kconfig/` 是否更新；`build/CMakeCache.txt` 里是否有旧的 `KCONFIG_CONFIG` |
+| CMake 找不到 CUDA/TensorRT | `.venv/` 是否包含匹配的 Toolkit、TensorRT 头文件和 `nvinfer`；必要时设置 `DUST_DEPENDENCY_ROOT` / `CUDAToolkit_ROOT`；确认 `DUST_VISION_YOLO` 是否打开 |
 | 报告 TensorRT 版本不符 | 当前根工程要求 TensorRT 10.x，确认实际 include 和 library 来自同一安装 |
-| 找不到 `0526.engine` | engine 是否放在默认 `build/0526.engine`，或配置时传入正确的 `-DARMOR_ENGINE_PATH=...` |
+| 找不到 engine | 看 `trd_vision.yaml` 的 `engine_path` 是否是可打开的路径（当前写成绝对路径） |
+| 报 `bad file ...thread/vision/trd_vision.yaml` | YAML 解析基准不对：确认构建（会复制 YAML）或设置 `DUST_CONFIG_ROOT` 指向含 `thread/` 的根 |
 | 找不到 MVS 或运行时加载失败 | 检查 `HIKROBOT_MVS_ROOT`、SDK 的库和 USB3 transport 组件，以及动态库搜索路径 |
-| 新增源文件后符号未链接 | 检查对应 `target_sources()` 或 `add_library()` 是否登记该 `.cpp` |
-| 修改 YAML 后运行值没变化 | 修改源配置而非仅改 build 副本，并检查该文件是否通过 `configure_file` 复制 |
+| 新增源文件后符号未链接 | 检查对应 `target_sources()` / `add_library()`，以及该源文件所在功能的 `CONFIG_*` 是否为 `y` |
 | 注册的初始化/线程没有执行 | 注册源是否进入最终可执行文件，链接脚本是否保留注册段，注册函数是否符合回调签名 |
 
 ## 文档索引
 
 | 文档 | 内容 |
 | --- | --- |
+| [Kconfig 构建链路引入规划](doc/Kconfig构建链路引入规划.md) | Kconfig 与 CMake 的职责分工、生成物和落地步骤 |
+| [视觉配置架构引入规划](doc/视觉配置架构引入规划.md) | 构建期开关、线程 YAML 与算法 Config 的三层配置边界 |
 | [视觉识别流程说明](doc/framework视觉识别流程说明.md) | 当前 YOLO 检测、后处理、精修边界和数据流 |
 | [视觉自瞄下一步规划](doc/视觉自瞄系统下一步实施规划.md) | 评估、阵营过滤、精修、PnP、跟踪、锁定与只读瞄准建议的建议顺序 |
 | [视觉算法分层规划](doc/视觉算法目录分层规划.md) | 视觉算法目录职责与依赖方向 |

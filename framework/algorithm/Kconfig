@@ -1,0 +1,40 @@
+# algorithm/Kconfig —— 算法能力：YOLO 装甲板检测、局部灯条精修。
+# 架构层能力默认 n，由业务层 select 拉起。
+
+config DUST_FLT_KALMAN
+    bool "kalman filter"
+    default n
+    help
+      Linear Kalman filter (algorithm/filter/kalman/kalman_filter.hpp).
+
+config DUST_FLT_KALMAN_EKF
+    bool "extended kalman filter"
+    default n
+    select DUST_FLT_KALMAN
+    help
+      Extended Kalman filter on top of the kalman filter (algorithm/filter/kalman/ekf.hpp).
+
+config DUST_FLT_QUATERNION
+    bool "quaternion attitude"
+    default n
+    help
+      Quaternion attitude helpers (algorithm/filter/attitude/quaternion_attitude.hpp).
+
+config DUST_MATH_ANGLE
+    bool "angle helpers"
+    default n
+    help
+      Angle wrap/compare helpers (algorithm/math/angle.hpp).
+
+config DUST_VISION_YOLO
+    bool "YOLO armor detection"
+    default n
+    help
+      Provide the framework vision target and TensorRT armor detector.
+
+config DUST_VISION_YOLO_REFINER
+    bool "YOLO armor detection + local light-bar refiner"
+    default n
+    select DUST_VISION_YOLO
+    help
+      Compile the optional OpenCV light-bar corner refiner.

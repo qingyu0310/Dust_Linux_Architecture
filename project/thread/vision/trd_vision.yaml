@@ -1,0 +1,22 @@
+# 视觉线程运行配置。DUST_CONFIG_ROOT 应指向包含 thread/ 的配置根目录，
+# 当前源码树中对应 <repo>/project；模型文件仍是配置根之外的独立部署资源。
+
+# 0526 TensorRT engine 的外部路径；不放入 build，也不由 CMake 生成。
+engine_path: /home/qingyudd01/projects/vscode/opencv/build/0526.engine
+
+# CUDA 设备编号；ArmorDetector 初始化时还会检查本机设备数量。
+cuda_device: 0
+
+# 0526 模型后处理门限。
+score_threshold: 0.7
+confidence_threshold: 0.8
+nms_threshold: 0.3
+
+# 局部灯条角点精修参数。精修器是否编进程序由构建期开关决定（CONFIG_DUST_VISION_YOLO_REFINER）；
+# 编进来就用这些参数，字段必需。
+brightness_threshold: 150
+min_light_length_px: 8.0
+min_light_ratio: 1.5
+max_light_ratio: 20.0
+max_light_tilt_deg: 45.0
+max_endpoint_distance_px: 15.0

@@ -10,6 +10,7 @@
  */
 
 #include "framework/algorithm/vision/detect/armor_detector.hpp"
+#include "framework/cmd/config/config.hpp"
 #include "framework/cmd/shell/log.hpp"
 #include "framework/init/Init_entry.hpp"
 #include "framework/init/thread.hpp"
@@ -18,13 +19,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
-#ifndef ARMOR_ENGINE_PATH
-#error "ARMOR_ENGINE_PATH must be provided by CMake"
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+#include "framework/algorithm/vision/refine/armor_refiner.hpp"
 #endif
 
 namespace thread::vision
@@ -35,6 +38,10 @@ using namespace topic::camera_to;
 using namespace init;
 
 static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
+
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+static std::unique_ptr<ArmorRefiner> refiner_;                          // 可选的局部灯条角点精修器
+#endif
 
 static Subscriber sub_camera_to {pub_camera_to_};             // vision 独占的相机帧订阅游标
 
@@ -89,6 +96,69 @@ static const char* LabelName(ArmorLabel label)
 }
 
 /**
+ * @brief 从视觉线程 YAML 读取检测器参数
+ */
+static void LoadDetectorConfig(ArmorDetector::Config& detector_config)
+{
+    cmd::config::Config yaml;
+    yaml.Load("thread/vision/trd_vision.yaml",
+              {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px"});
+
+    detector_config.engine_path = yaml.GetPath("engine_path");
+    if (detector_config.engine_path.empty())
+    {
+        throw std::runtime_error("vision config: engine_path must not be empty");
+    }
+    detector_config.cuda_device          = yaml.GetInt("cuda_device", 0, std::numeric_limits<int>::max());
+    detector_config.nms_threshold        = static_cast<float>(yaml.GetDouble("nms_threshold", 0.0, 1.0));
+    detector_config.score_threshold      = static_cast<float>(yaml.GetDouble("score_threshold", 0.0, 1.0));
+    detector_config.confidence_threshold = static_cast<float>(yaml.GetDouble("confidence_threshold", 0.0, 1.0));
+}
+
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+/**
+ * @brief 从视觉线程 YAML 读取精修参数
+ *
+ * 精修器编进程序就生效，参数必须齐备。
+ */
+static void LoadRefinerConfig(ArmorRefiner::Config& refiner_config)
+{
+    cmd::config::Config yaml;
+    yaml.Load("thread/vision/trd_vision.yaml", 
+              {"engine_path", "cuda_device", "score_threshold", "confidence_threshold", "nms_threshold"},
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio", "max_light_tilt_deg", "max_endpoint_distance_px"});
+
+    const char* const refiner_keys[] = { 
+        "brightness_threshold", 
+        "min_light_length_px", 
+        "min_light_ratio",
+        "max_light_ratio", 
+        "max_light_tilt_deg", 
+        "max_endpoint_distance_px"
+    };
+    for (const char* key : refiner_keys)
+    {
+        if (!yaml.Has(key))
+        {
+            throw std::runtime_error(std::string("vision config: missing refiner field: ") + key);
+        }
+    }
+
+    refiner_config.brightness_threshold = yaml.GetInt("brightness_threshold", 0, 255);
+    refiner_config.min_light_ratio      = static_cast<float>(yaml.GetDouble("min_light_ratio",     0.0, 1000000.0));
+    refiner_config.max_light_ratio      = static_cast<float>(yaml.GetDouble("max_light_ratio",     0.0, 1000000.0));
+    refiner_config.min_light_length_px  = static_cast<float>(yaml.GetDouble("min_light_length_px", 0.0, 1000000.0));
+
+    const double max_tilt_deg = yaml.GetDouble("max_light_tilt_deg", 0.0, 90.0);
+    refiner_config.max_light_tilt_rad       = static_cast<float>(max_tilt_deg * 3.14159265358979323846 / 180.0);
+    refiner_config.max_endpoint_distance_px = static_cast<float>(yaml.GetDouble("max_endpoint_distance_px", 0.0, 1000000.0));
+
+    refiner_config.Validate();
+}
+#endif
+
+/**
  * @brief 一秒统计窗口
  *
  * 保存该窗口内的帧数、各级候选统计、平均耗时累加值和最高置信度目标；
@@ -96,20 +166,20 @@ static const char* LabelName(ArmorLabel label)
  */
 struct ReportWindow
 {
-    uint32_t frames              {0};       // 完成识别的帧数
-    uint64_t score_passed        {0};       // 通过 objectness 阈值的原始候选数
-    uint64_t nms_kept            {0};       // NMS 后保留的候选数
-    uint64_t accepted            {0};       // 最终接受的装甲板数
-    uint64_t rejected_confidence {0};       // 因置信度不足被拒绝的候选数
-    uint64_t rejected_color      {0};       // 因颜色输出无效被拒绝的候选数
-    uint64_t rejected_label_type {0};       // 因标签与尺寸不匹配被拒绝的候选数
-    uint64_t rejected_geometry   {0};       // 因四点几何无效被拒绝的候选数
-    float    max_objectness      {0.0f};    // 窗口内最高原始 objectness
-    double   preprocess_ms       {0.0};     // 预处理耗时累加值，单位 ms
-    double   inference_ms        {0.0};     // TensorRT 推理耗时累加值，单位 ms
-    double   postprocess_ms      {0.0};     // 后处理耗时累加值，单位 ms
-    double   frame_age_ms        {0.0};     // 相机时间戳到识别完成的帧龄累加值，单位 ms
-    std::optional<DetectedArmor> best;      // 窗口内置信度最高的有效装甲板
+    uint32_t frames              {0};               // 完成识别的帧数
+    uint64_t score_passed        {0};               // 通过 objectness 阈值的原始候选数
+    uint64_t nms_kept            {0};               // NMS 后保留的候选数
+    uint64_t accepted            {0};               // 最终接受的装甲板数
+    uint64_t rejected_confidence {0};               // 因置信度不足被拒绝的候选数
+    uint64_t rejected_color      {0};               // 因颜色输出无效被拒绝的候选数
+    uint64_t rejected_label_type {0};               // 因标签与尺寸不匹配被拒绝的候选数
+    uint64_t rejected_geometry   {0};               // 因四点几何无效被拒绝的候选数
+    float    max_objectness      {0.0f};            // 窗口内最高原始 objectness
+    double   preprocess_ms       {0.0};             // 预处理耗时累加值，单位 ms
+    double   inference_ms        {0.0};             // TensorRT 推理耗时累加值，单位 ms
+    double   postprocess_ms      {0.0};             // 后处理耗时累加值，单位 ms
+    double   frame_age_ms        {0.0};             // 相机时间戳到识别完成的帧龄累加值，单位 ms
+    std::optional<DetectedArmor> best;              // 窗口内置信度最高的有效装甲板
 
     /**
      * @brief 累加一帧检测结果
@@ -167,7 +237,7 @@ static void LogReport(const ReportWindow& report, double elapsed)
     }
 
     const DetectedArmor& armor = *report.best;
-    const auto&          corners = armor.GetCorners();
+    const auto& corners = armor.GetCorners();
     DUST_LOG_DBG("vision", "fps=%.1f taken=%llu dropped=%llu raw=25200 score=%llu nms=%llu accepted=%llu reject(conf/color/type/geometry)=%llu/%llu/%llu/%llu max_obj=%.3f ms(pre/infer/post/age)=%.2f/%.2f/%.2f/%.2f target=%s/%s conf=%.3f corners=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)", report.frames / elapsed, static_cast<unsigned long long>(sub_camera_to.Taken()), static_cast<unsigned long long>(sub_camera_to.Dropped()), static_cast<unsigned long long>(report.score_passed), static_cast<unsigned long long>(report.nms_kept), static_cast<unsigned long long>(report.accepted), static_cast<unsigned long long>(report.rejected_confidence), static_cast<unsigned long long>(report.rejected_color), static_cast<unsigned long long>(report.rejected_label_type), static_cast<unsigned long long>(report.rejected_geometry), report.max_objectness, report.preprocess_ms / denominator, report.inference_ms / denominator, report.postprocess_ms / denominator, report.frame_age_ms / denominator, ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence(), corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y);
 }
 
@@ -192,11 +262,34 @@ static void Task(void*, void*, void*)
         }
 
         // 对当前相机帧同步执行预处理、TensorRT 推理和后处理
-        const auto           processing_begin = std::chrono::steady_clock::now();
+        const auto processing_begin = std::chrono::steady_clock::now();
         ArmorDetectionResult result = detector_->Detect(message.image);
-        const auto           now = std::chrono::steady_clock::now();
-        const double         processing_ms = std::chrono::duration<double, std::milli>(now - processing_begin).count();
-        const double         age_ms = std::chrono::duration<double, std::milli>(now - message.timestamp).count();
+
+        #ifdef CONFIG_DUST_VISION_YOLO_REFINER
+        {
+            if (refiner_)
+            {
+                for (DetectedArmor& armor : result.armors)
+                {
+                    const ArmorRefinementResult refinement = refiner_->Refine(message.image, armor.GetCorners());
+                    if (!refinement.Applied())
+                    {
+                        continue;
+                    }
+
+                    const std::optional<DetectedArmor> refined = armor.WithCorners(refinement.final_corners, message.image.size());
+                    if (refined)
+                    {
+                        armor = *refined;
+                    }
+                }
+            }
+        }
+        #endif
+
+        const auto   now = std::chrono::steady_clock::now();
+        const double processing_ms         = std::chrono::duration<double, std::milli>(now - processing_begin).count();
+        const double age_ms                = std::chrono::duration<double, std::milli>(now - message.timestamp).count();
         report.Add(result, age_ms);
 
         // 停止期间不再发布刚完成的结果，避免关闭后的结果通道被重新写入
@@ -225,11 +318,21 @@ static void Task(void*, void*, void*)
  */
 bool thread_init()
 {
-    ArmorDetector::Config config;
-    config.engine_path = ARMOR_ENGINE_PATH;
-    detector_ = std::make_unique<ArmorDetector>(config);
+    ArmorDetector::Config detector_config;
+    LoadDetectorConfig(detector_config);
+    detector_ = std::make_unique<ArmorDetector>(detector_config);
 
-    DUST_LOG_INF("[vision] TensorRT device=%d engine=%s input=%s/%s [1,3,%d,%d] output=%s FP32 [1,%d,%d]", config.cuda_device, config.engine_path.c_str(), detector_->GetInputName().c_str(), detector_->GetInputTypeName().c_str(), detector_->GetInputHeight(), detector_->GetInputWidth(), detector_->GetOutputName().c_str(), detector_->GetOutputRows(), detector_->GetOutputColumns());
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+    ArmorRefiner::Config refiner_config;
+    LoadRefinerConfig(refiner_config);
+
+    refiner_ = std::make_unique<ArmorRefiner>(refiner_config);
+    const char* const refiner_state = "on";
+#else
+    const char* const refiner_state = "off";
+#endif
+
+    DUST_LOG_INF("[vision] TensorRT device=%d engine=%s score=%.3f confidence=%.3f nms=%.3f refiner=%s input=%s/%s [1,3,%d,%d] output=%s FP32 [1,%d,%d]", detector_config.cuda_device, detector_config.engine_path.c_str(), detector_config.score_threshold, detector_config.confidence_threshold, detector_config.nms_threshold, refiner_state, detector_->GetInputName().c_str(), detector_->GetInputTypeName().c_str(), detector_->GetInputHeight(), detector_->GetInputWidth(), detector_->GetOutputName().c_str(), detector_->GetOutputRows(), detector_->GetOutputColumns());
     return true;
 }
 
@@ -238,6 +341,11 @@ bool thread_init()
  */
 void Release()
 {
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+{
+    refiner_.reset();
+}
+#endif
     detector_.reset();
     topic::vision_to::pub_vision_to_.Clear();
 }

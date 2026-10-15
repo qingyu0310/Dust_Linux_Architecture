@@ -62,6 +62,14 @@ public:
      */
     static std::optional<DetectedArmor> Create(const DetectedArmorGeometry& geometry, const DetectedArmorIdentity& identity, float confidence, const cv::Size& image_size);
 
+    /**
+     * @brief 使用同一类别和置信度重新校验一组精修后的角点
+     * @param corners 原图坐标下的 TL、TR、BR、BL 四点
+     * @param image_size 原始输入图像尺寸
+     * @return 角点仍满足检测结果契约时返回新对象
+     */
+    std::optional<DetectedArmor> WithCorners(const std::array<cv::Point2f, 4>& corners, const cv::Size& image_size) const;
+
     const std::array<cv::Point2f, 4>& GetCorners() const noexcept
     {
         return geometry_.corners;

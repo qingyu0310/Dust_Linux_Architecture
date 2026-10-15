@@ -1,0 +1,70 @@
+# 业务门禁 Kconfig（位置：<repo>/project）
+# 业务门禁符号（TRD_ / USE_）保持原名，不加 DUST_ 前缀
+# 业务门禁 select 的架构符号统一 DUST_ 前缀
+
+# ============================================================================
+
+# =================       功能配置区 — 使用开关       ========================
+
+config USE_CMD_SHELL
+    bool "Shell debug console (thread + var/log)"
+    default y
+    select DUST_CMD_SHELL_LOG
+    select DUST_CMD_SHELL_VAR
+    help
+      Shell debug console — console thread + log/var sub-commands.
+
+config USE_CMD_CONFIG
+    bool "YAML runtime config loader"
+    default y
+    select DUST_CMD_CONFIG
+    help
+      Per-thread YAML parameter loading and field validation (cmd/config).
+
+# ============================================================================
+
+# =================              TRD_CAMERA              ====================
+
+config TRD_CAMERA
+    bool "Camera thread"
+    default y
+    select DUST_MOD_DEV_HIKROBOT
+    select DUST_TPC_CAMERA_TO
+    help
+      HikRobot camera acquisition thread and its frame channel.
+
+# ============================================================================
+
+# =================               TRD_TEST               ====================
+
+config TRD_TEST
+    bool "User test thread"
+    default n
+    help
+      Temporary user test switch.
+
+# ============================================================================
+
+# =================              TRD_VISION              ====================
+
+config TRD_VISION
+    bool "Vision detection thread"
+    default y
+    select DUST_VISION_YOLO
+    select DUST_TPC_CAMERA_TO
+    select DUST_TPC_VISION_TO
+    help
+      Enable the 0526 TensorRT armor detection thread and its result channel.
+
+# ============================================================================
+
+# =================             TRD_DISPLAY              ====================
+
+config TRD_DISPLAY
+    bool "Vision display thread"
+    depends on TRD_VISION
+    default y
+    select DUST_TPC_CAMERA_TO
+    select DUST_TPC_VISION_TO
+    help
+      Enable the OpenCV display thread.

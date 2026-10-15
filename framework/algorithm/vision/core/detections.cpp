@@ -14,6 +14,7 @@
 #include "framework/algorithm/vision/core/geometry_util.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace algorithm::vision
 {
@@ -58,6 +59,36 @@ std::optional<DetectedArmor> DetectedArmor::Create(const DetectedArmorGeometry& 
     }
 
     return DetectedArmor(geometry, identity, confidence);
+}
+
+/**
+ * @brief 由同一装甲板的精修四点重新构造检测结果
+ *
+ * 身份和置信度保持模型结果不变，几何量由新四点重算并再次走统一校验。
+ */
+std::optional<DetectedArmor> DetectedArmor::WithCorners(const std::array<cv::Point2f, 4>& corners, const cv::Size& image_size) const
+{
+    cv::Point2f center;
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+
+    for (const auto& point : corners)
+    {
+        center += point;
+        min_x = std::min(min_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_x = std::max(max_x, point.x);
+        max_y = std::max(max_y, point.y);
+    }
+    center *= 0.25f;
+
+    const DetectedArmorGeometry geometry {
+        corners,
+        center,
+        cv::Rect2f {min_x, min_y, max_x - min_x, max_y - min_y}};
+    return Create(geometry, identity_, confidence_, image_size);
 }
 
 } // namespace algorithm::vision
