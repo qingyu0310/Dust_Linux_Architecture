@@ -19,7 +19,7 @@ namespace debug
 {
 
 constexpr size_t kTxPoolSize  = 8;
-constexpr size_t kTxFrameSize = 128;
+constexpr size_t kTxFrameSize = 320;
 
 /**
  * @brief 发送帧；拥有完整输出字节，不引用调用方数据

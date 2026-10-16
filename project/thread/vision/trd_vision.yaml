@@ -37,3 +37,17 @@ distort_p1: -0.0004933148161
 distort_p2: 0.001394902737
 distort_k3: 0
 reprojection_error_px: 0.106212
+
+# ---- 装甲板位姿与整车参数：PnP 的物点尺寸与跟踪器初值 ----
+# 装甲板物理尺寸，单位 m。小装甲板 135 mm（面板宽，不含灯条）、灯条长 56 mm。
+# 写错会直接体现为距离成比例偏差。
+armor_small_width_m: 0.135
+armor_big_width_m: 0.230
+armor_lightbar_length_m: 0.056
+
+# 车体旋转半径初值，单位 m；只在跟踪器初始化时用，之后由观测修正。
+# 0.2 是参考对普通步兵车的取值（tracker.cpp:391）。调大：收敛前外推更散；调小：无明显代价。
+armor_radius_init_m: 0.2
+
+# 整车装甲板数量。四面车为 4；收敛前不画另外三面。
+armor_num: 4

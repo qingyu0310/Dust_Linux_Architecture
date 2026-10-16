@@ -34,7 +34,7 @@ if(CONFIG_DUST_MOD_DEV_HIKROBOT)
     target_link_libraries(vision_app PRIVATE framework_modules)
 endif()
 
-if(CONFIG_DUST_VISION_YOLO)
+if(CONFIG_DUST_VISION_YOLO OR CONFIG_DUST_VISION_POSE)
     target_link_libraries(vision_app PRIVATE framework_vision)
 endif()
 

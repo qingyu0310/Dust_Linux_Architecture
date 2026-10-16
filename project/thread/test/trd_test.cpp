@@ -3,111 +3,124 @@
  * @author qingyu
  * @brief 测试线程：初始化注册与当前这一条测试
  * @version 0.1
- * @date 2026-10-12
+ * @date 2026-10-16
  *
  * @copyright Copyright (c) 2026
  *
  */
 
-#include "framework/algorithm/calib/camera_calib.hpp"
-#include <algorithm>
+#include "framework/algorithm/vision/pose/armor_pose.hpp"
 #include "framework/init/Init_entry.hpp"
 #include "framework/cmd/shell/log.hpp"
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
 #include <optional>
-#include <utility>
 #include <vector>
 
 namespace thread::test
 {
 /**
- * @brief 用合成观测反解一遍内参，验证算法层的求解链
+ * @brief 用合成观测反解一遍单块装甲板位姿，验证物点、单位与 PnP 链
  *
- * 内参与畸变取参考那台相机的值（同一 USB 型号、同一 1440×1080），按六组板姿态用
- * projectPoints 造出圆心像素坐标，再喂给 SolveIntrinsics。输入本来就是用这组内参生成的，
- * 解回去必须落在同一组数上；解不回去说明点序、单位或 flag 写错了，跟相机没关系。
+ * 内参取本机标定值，按几组板姿态用 projectPoints 造出像素四点，再喂给 SolvePose。
+ * 输入本来就是用这组物点生成的，解回去必须落回同一组数上：解不回来说明物点顺序、单位
+ * 或 Rodrigues 用错了，跟相机没关系。
  *
- * 板点在这里重新排一遍而不去调算法层的内部函数：合成样本和求解器各排一次，顺序约定
- * 写错才暴露得出来。真机上的点序（findCirclesGrid 的返回顺序）只能靠实际标定验证。
+ * 注意这一条**验不了板系的符号分配**：造样本和求解用的是同一份物点，y/z 谁在左谁在上
+ * 都能自洽地回去。符号是否与实物板一致只能靠实拍（把板放在量好距离上比 ‖tvec‖）。
  *
- * @return true 反解结果与设定值一致
+ * @return true 反解位姿与设定值一致
  */
-static bool CheckCalibration()
+static bool CheckPose()
 {
-    const algorithm::calib::Board board;
-    const cv::Size image_size(1440, 1080);
+    algorithm::vision::CameraModel camera;
+    camera.fx = 1799.539711;
+    camera.fy = 1800.364749;
+    camera.cx = 722.8841479;
+    camera.cy = 504.3663714;
+    camera.k1 = -0.07677082222;
+    camera.k2 = 0.1417360699;
+    camera.p1 = -0.0004933148161;
+    camera.p2 = 0.001394902737;
+    camera.k3 = 0.0;
 
-    const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << 1808.8304696430803, 0.0, 713.70459283498224,
-                                                          0.0, 1808.0411873540195, 566.09347726083934,
-                                                          0.0, 0.0, 1.0);
-    const cv::Mat distort_coeffs = (cv::Mat_<double>(1, 5) << -0.073241403353599299, 0.14495759982904788,
-                                                             0.00028937879061362732, -0.00026770913811837289, 0.0);
-
-    std::vector<cv::Point3f> board_points;
-    board_points.reserve(static_cast<std::size_t>(board.cols) * static_cast<std::size_t>(board.rows));
-    for (std::int32_t row = 0; row < board.rows; ++row)
+    const algorithm::vision::ArmorDimensions dimensions; // 缺省即实物尺寸
+    const std::optional<std::array<cv::Point3f, 4>> object_points = algorithm::vision::MakeObjectPoints(algorithm::vision::ArmorSize::Small, dimensions);
+    if (!object_points)
     {
-        for (std::int32_t col = 0; col < board.cols; ++col)
-        {
-            board_points.emplace_back(static_cast<float>(col * board.center_distance_mm), static_cast<float>(row * board.center_distance_mm), 0.0f);
-        }
-    }
-
-    // 板心先挪到光轴附近，z 取 700–950 mm（与规划的 0.5–1.0 m 工作距离同量级）；
-    // 每组都带倾角，只靠平移也能凑出观测，那样验不到倾斜方向的约束
-    const double poses[6][6] = {
-        { 0.00,  0.00, 0.00, -160.0, -100.0, 700.0},
-        { 0.30,  0.30, 0.00, -160.0, -100.0, 800.0},
-        {-0.30,  0.30, 0.00, -160.0, -100.0, 800.0},
-        {-0.30, -0.30, 0.00, -160.0, -100.0, 900.0},
-        { 0.30, -0.30, 0.00, -160.0, -100.0, 900.0},
-        { 0.45,  0.15, 0.20, -160.0, -100.0, 950.0},
-    };
-
-    std::vector<std::vector<cv::Point2f>> image_points;
-    image_points.reserve(6);
-    for (const auto& pose : poses)
-    {
-        const cv::Vec3d rotation(pose[0], pose[1], pose[2]);
-        const cv::Vec3d translation(pose[3], pose[4], pose[5]);
-        std::vector<cv::Point2f> projected;
-        cv::projectPoints(board_points, rotation, translation, camera_matrix, distort_coeffs, projected);
-        image_points.push_back(std::move(projected));
-    }
-
-    const std::optional<algorithm::calib::Intrinsics> solved = algorithm::calib::SolveIntrinsics(board, image_points, image_size);
-    if (!solved)
-    {
-        DUST_LOG_ERR("calib selfcheck: SolveIntrinsics returned nothing");
+        DUST_LOG_ERR("pose selfcheck: MakeObjectPoints returned nothing");
         return false;
     }
 
-    // 结构项（0 和 1）没有相对误差可算，分母统一取 max(|期望|, 1)；畸变系数一律按绝对值比
-    double matrix_error = 0.0;
-    for (std::int32_t row = 0; row < 3; ++row)
+    const std::vector<cv::Point3f> object_list(object_points->begin(), object_points->end());
+    const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << camera.fx, 0.0, camera.cx,
+                                                                        0.0, camera.fy, camera.cy,
+                                                                        0.0, 0.0, 1.0);
+    const cv::Mat distort_coeffs = (cv::Mat_<double>(1, 5) << camera.k1, camera.k2, camera.p1, camera.p2, camera.k3);
+
+    // 板心放在光轴附近的不同距离上，每组都带倾角：只靠正对光轴也能凑出观测，那样验不到倾斜。
+    // 距离覆盖实拍用过的 0.3~0.5 m 与更远的 1.0~2.0 m——近处的角点离主点远，畸变位移大，
+    // 若重投影只在近处涨，说明求解链没把畸变吃进去（若是网络角点噪声，近处远处都应一样）。
+    const double poses[5][6] = {
+        { 0.15,  0.10, 0.00, -0.03, -0.02, 0.3},
+        { 0.15,  0.10, 0.00, -0.04, -0.03, 0.4},
+        { 0.10,  0.10, 0.00, -0.05, -0.03, 0.5},
+        { 0.00,  0.00, 0.00, -0.02, -0.01, 1.0},
+        { 0.15, -0.20, 0.20, -0.04, -0.05, 2.0},
+    };
+
+    double tvec_error_max   = 0.0;
+    double rotation_error_max = 0.0;
+    double reprojection_max = 0.0;
+
+    for (const auto& pose : poses)
     {
-        for (std::int32_t col = 0; col < 3; ++col)
+        const cv::Vec3d rvec_in(pose[0], pose[1], pose[2]);
+        const cv::Vec3d tvec_in(pose[3], pose[4], pose[5]);
+
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(object_list, rvec_in, tvec_in, camera_matrix, distort_coeffs, projected);
+
+        std::array<cv::Point2f, 4> corners {};
+        std::copy(projected.begin(), projected.end(), corners.begin());
+
+        const std::optional<algorithm::vision::ArmorPose> solved = algorithm::vision::SolvePose(corners, *object_points, camera);
+        if (!solved)
         {
-            const double expected = camera_matrix.at<double>(row, col);
-            matrix_error = std::max(matrix_error, std::abs(solved->camera_matrix[row * 3 + col] - expected) / std::max(std::abs(expected), 1.0));
+            DUST_LOG_ERR("pose selfcheck: SolvePose returned nothing");
+            return false;
         }
+
+        double tvec_error = 0.0;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            tvec_error = std::max(tvec_error, std::abs(solved->tvec[axis] - tvec_in[axis]));
+        }
+        tvec_error_max = std::max(tvec_error_max, tvec_error);
+
+        // 旋转量比矩阵而不是比 rvec 分量：同一旋转的 Rodrigues 表示可以有多种写法
+        cv::Mat rotation_in;
+        cv::Mat rotation_solved;
+        cv::Rodrigues(rvec_in, rotation_in);
+        cv::Rodrigues(solved->rvec, rotation_solved);
+        rotation_error_max = std::max(rotation_error_max, cv::norm(rotation_in, rotation_solved, cv::NORM_INF));
+
+        reprojection_max = std::max(reprojection_max, solved->reprojection_error_px);
+
+        // 逐距离打一行：重投影随距离的变化就是本条的判据
+        DUST_LOG_INF("pose selfcheck d=%.2fm tvec=%.3e m reprojection=%.3e px", tvec_in[2], tvec_error, solved->reprojection_error_px);
     }
 
-    double coefficient_error = 0.0;
-    for (std::int32_t index = 0; index < 5; ++index)
-    {
-        coefficient_error = std::max(coefficient_error, std::abs(solved->distort_coeffs[index] - distort_coeffs.at<double>(0, index)));
-    }
+    // 合成观测没有噪声，但角点存在 float 里：像素坐标 ~700 px 时尾数量化台阶约 4e-5 px，
+    // 重投影的地板就是这个量级（实测 2.3e-5）。1e-3 m / 1e-6 / 1e-3 px 是拿来抓"物点顺序、
+    // 单位、Rodrigues"那类量级 1e-1 的错，不是精度指标
+    const bool passed = tvec_error_max < 1.0e-3 && rotation_error_max < 1.0e-6 && reprojection_max < 1.0e-3;
 
-    // 合成观测没有噪声，但圆心存成 float，量化台阶约 1e-4 px，反解误差的地板在 1e-6 量级；
-    // 1e-3 是拿来抓"点序/单位/flag 写错"那类量级 1e-1 的错，不是精度指标
-    const bool passed = matrix_error < 1.0e-3 && coefficient_error < 1.0e-3 && solved->reprojection_error_px < 1.0e-3;
-
-    DUST_LOG_INF("calib selfcheck %s: fx=%.4f fy=%.4f cx=%.4f cy=%.4f", passed ? "ok" : "failed", solved->camera_matrix[0],
-                 solved->camera_matrix[4], solved->camera_matrix[2], solved->camera_matrix[5]);
-    DUST_LOG_INF("calib selfcheck: matrix=%.3e coef=%.3e reprojection=%.3e px", matrix_error, coefficient_error, solved->reprojection_error_px);
+    DUST_LOG_INF("pose selfcheck %s: tvec=%.3e m rotation=%.3e reprojection=%.3e px", passed ? "ok" : "failed", tvec_error_max, rotation_error_max, reprojection_max);
 
     return passed;
 }
@@ -117,7 +130,7 @@ static bool CheckCalibration()
  */
 bool thread_init()
 {
-    if (!CheckCalibration())
+    if (!CheckPose())
     {
         return false;
     }

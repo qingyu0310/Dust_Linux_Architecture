@@ -44,3 +44,10 @@ config DUST_VISION_YOLO_REFINER
     select DUST_VISION_YOLO
     help
       Compile the optional OpenCV light-bar corner refiner.
+
+config DUST_VISION_POSE
+    bool "armor pose (PnP)"
+    default n
+    help
+      Single-armor camera-frame pose from the detected corners and the calibrated
+      intrinsics: object points, IPPE solve and reprojection check (vision/pose).

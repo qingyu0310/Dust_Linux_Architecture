@@ -19,7 +19,7 @@
 namespace debug
 {
     
-constexpr size_t kLogBufSize = 256;
+constexpr size_t kLogBufSize = 512;
 
 /**
  * @brief 已格式化日志记录，不存储调用方字符串或参数指针

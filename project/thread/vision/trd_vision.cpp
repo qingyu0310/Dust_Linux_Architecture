@@ -10,6 +10,7 @@
  */
 
 #include "framework/algorithm/vision/detect/armor_detector.hpp"
+#include "framework/algorithm/vision/pose/armor_pose.hpp"
 #include "framework/cmd/config/config.hpp"
 #include "framework/cmd/shell/log.hpp"
 #include "framework/init/Init_entry.hpp"
@@ -18,13 +19,17 @@
 #include "framework/topic/vision_to/vision_to.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
+#include <opencv2/imgproc.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #ifdef CONFIG_DUST_VISION_YOLO_REFINER
 #include "framework/algorithm/vision/refine/armor_refiner.hpp"
@@ -44,18 +49,18 @@ using namespace init;
  */
 struct CameraIntrinsics
 {
-    std::int32_t image_width {0};               // 标定时的图像宽度，单位 pixel
-    std::int32_t image_height {0};              // 标定时的图像高度，单位 pixel
-    double       fx {0.0};                      // x 方向焦距，单位 pixel
-    double       fy {0.0};                      // y 方向焦距，单位 pixel
-    double       cx {0.0};                      // 主点横坐标，单位 pixel
-    double       cy {0.0};                      // 主点纵坐标，单位 pixel
-    double       k1 {0.0};                      // 径向畸变一阶系数
-    double       k2 {0.0};                      // 径向畸变二阶系数
-    double       p1 {0.0};                      // 切向畸变一阶系数
-    double       p2 {0.0};                      // 切向畸变二阶系数
-    double       k3 {0.0};                      // 径向畸变三阶系数，标定时固定为 0
-    double       reprojection_error_px {0.0};   // 标定时的重投影误差，单位 pixel
+    int32_t image_width  {0};                       // 标定时的图像宽度，单位 pixel
+    int32_t image_height {0};                       // 标定时的图像高度，单位 pixel
+    double  fx {0.0};                               // x 方向焦距，单位 pixel
+    double  fy {0.0};                               // y 方向焦距，单位 pixel
+    double  cx {0.0};                               // 主点横坐标，单位 pixel
+    double  cy {0.0};                               // 主点纵坐标，单位 pixel
+    double  k1 {0.0};                               // 径向畸变一阶系数
+    double  k2 {0.0};                               // 径向畸变二阶系数
+    double  p1 {0.0};                               // 切向畸变一阶系数
+    double  p2 {0.0};                               // 切向畸变二阶系数
+    double  k3 {0.0};                               // 径向畸变三阶系数，标定时固定为 0
+    double  reprojection_error_px {0.0};            // 标定时的重投影误差，单位 pixel
 };
 
 /**
@@ -80,6 +85,29 @@ struct ReportWindow
     double   postprocess_ms      {0.0};             // 后处理耗时累加值，单位 ms
     double   frame_age_ms        {0.0};             // 相机时间戳到识别完成的帧龄累加值，单位 ms
     std::optional<DetectedArmor> best;              // 窗口内置信度最高的有效装甲板
+
+    uint64_t pnp_ok              {0};               // 解出位姿的装甲板数
+    uint64_t pnp_invalid         {0};               // 尺寸不明或角点退化、未解算的装甲板数
+    double   pnp_reprojection_px {0.0};             // 解出位姿的反投误差累加值，单位 pixel
+    double   pnp_distance_m      {0.0};             // 解出位姿的板心距离累加值，单位 m
+
+    /**
+     * @brief 累加一帧的位姿解算结果
+     *
+     * 与检测统计分开累加：位姿是检测的下游，只有解出位姿的那几块才计入这里。
+     *
+     * @param solved 本帧解出位姿的装甲板数
+     * @param invalid 本帧因尺寸不明或角点退化未解算的装甲板数
+     * @param reprojection_px 本帧解出位姿的反投误差累加值，单位 pixel
+     * @param distance_m 本帧解出位姿的板心距离累加值，单位 m
+     */
+    void AddPose(uint64_t solved, uint64_t invalid, double reprojection_px, double distance_m)
+    {
+        pnp_ok              += solved;
+        pnp_invalid         += invalid;
+        pnp_reprojection_px += reprojection_px;
+        pnp_distance_m      += distance_m;
+    }
 
     /**
      * @brief 累加一帧检测结果
@@ -123,6 +151,8 @@ struct ReportWindow
 };
 
 static CameraIntrinsics camera_intrinsics_ {};                          // 本线程读入的内参，后续 PnP 使用
+
+static ArmorDimensions armor_dimensions_ {};                           // 装甲板实物尺寸，PnP 物点用
 
 static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
 
@@ -193,7 +223,7 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     cmd::config::Config yaml;
     yaml.Load("thread/vision/trd_vision.yaml",
               {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
-              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px"});
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px", "armor_small_width_m", "armor_big_width_m", "armor_lightbar_length_m", "armor_radius_init_m", "armor_num"});
 
     detector_config.engine_path = yaml.GetPath("engine_path");
     if (detector_config.engine_path.empty())
@@ -220,6 +250,10 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     camera_intrinsics_.k3                    = yaml.GetDouble("distort_k3", -1000.0,    1000.0);
 
     camera_intrinsics_.reprojection_error_px = yaml.GetDouble("reprojection_error_px", 0.0, 1000000.0);
+
+    armor_dimensions_.small_width_m     = yaml.GetDouble("armor_small_width_m",     0.001, 10.0);
+    armor_dimensions_.big_width_m       = yaml.GetDouble("armor_big_width_m",       0.001, 10.0);
+    armor_dimensions_.lightbar_length_m = yaml.GetDouble("armor_lightbar_length_m", 0.001, 10.0);
 
     DUST_LOG_INF("vision: intrinsics %dx%d fx=%.3f fy=%.3f cx=%.3f cy=%.3f", camera_intrinsics_.image_width, camera_intrinsics_.image_height, camera_intrinsics_.fx, camera_intrinsics_.fy, camera_intrinsics_.cx, camera_intrinsics_.cy);
 }
@@ -267,22 +301,102 @@ static void LoadRefinerConfig(ArmorRefiner::Config& refiner_config)
 #endif
 
 /**
+ * @brief 把线程读入的内参折算成算法层的针孔模型
+ */
+static CameraModel ToCameraModel(const CameraIntrinsics& intrinsics)
+{
+    CameraModel camera;
+    camera.fx = intrinsics.fx;
+    camera.fy = intrinsics.fy;
+    camera.cx = intrinsics.cx;
+    camera.cy = intrinsics.cy;
+    camera.k1 = intrinsics.k1;
+    camera.k2 = intrinsics.k2;
+    camera.p1 = intrinsics.p1;
+    camera.p2 = intrinsics.p2;
+    camera.k3 = intrinsics.k3;
+
+    return camera;
+}
+
+/**
+ * @brief 对每块检测到的装甲板解位姿，把解出的四点轮廓描在副本上
+ *
+ * 画的是原图副本——通道里的像素与显示侧共享，改图的一方自己复制。此时画的是真的测到的
+ * 那一块，不是外推的另外三面（那要等跨帧跟踪收敛）。
+ *
+ * @param image 相机帧，整幅 BGR
+ * @param armors 本帧检测结果
+ * @param report 本帧位姿统计，解出与未解出的块数都累加进去
+ * @return 叠加好位姿轮廓的图像
+ */
+static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>& armors, ReportWindow& report)
+{
+    cv::Mat drawn = image.clone();
+    const CameraModel camera = ToCameraModel(camera_intrinsics_);
+
+    uint64_t solved  = 0;
+    uint64_t invalid = 0;
+    double reprojection_sum = 0.0;
+    double distance_sum     = 0.0;
+
+    for (const DetectedArmor& armor : armors)
+    {
+        const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(armor.GetSize(), armor_dimensions_);
+        const std::optional<ArmorPose> pose = object_points ? SolvePose(armor.GetCorners(), *object_points, camera) : std::nullopt;
+        if (!pose)
+        {
+            ++invalid;
+            continue;
+        }
+
+        ++solved;
+        reprojection_sum += pose->reprojection_error_px;
+        distance_sum     += cv::norm(pose->tvec);
+
+        // 描解出的四点轮廓：与实测四点是否贴合，肉眼一看就知道位姿对不对
+        std::vector<cv::Point> contour;
+        contour.reserve(pose->projected.size());
+        for (const cv::Point2f& point : pose->projected)
+        {
+            contour.emplace_back(cv::Point(static_cast<int32_t>(std::lround(point.x)), static_cast<int32_t>(std::lround(point.y))));
+        }
+        cv::polylines(drawn, contour, true, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+
+        // 置信度文字跟在轮廓左上角，颜色跟着队伍颜色，方便一眼分辨红蓝
+        const cv::Scalar color = armor.GetColor() == TeamColor::Red ? cv::Scalar(0, 0, 255) : cv::Scalar(255, 0, 0);
+        char text[64];
+        std::snprintf(text, sizeof(text), "%s/%s %.2f", ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence());
+        const cv::Point text_position(static_cast<int32_t>(contour[0].x), static_cast<int32_t>(std::max(18.0f, contour[0].y - 6.0f)));
+        cv::putText(drawn, text, text_position, cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv::LINE_AA);
+    }
+
+    report.AddPose(solved, invalid, reprojection_sum, distance_sum);
+    return drawn;
+}
+
+/**
  * @brief 输出一条识别窗口汇总日志
  * @param report 已完成的一秒统计窗口
  * @param elapsed 窗口实际持续时间，单位 s
  */
 static void LogReport(const ReportWindow& report, double elapsed)
 {
-    const double denominator = report.frames == 0 ? 1.0 : static_cast<double>(report.frames);
+    const double denominator     = report.frames == 0 ? 1.0 : static_cast<double>(report.frames);
+    const double pnp_denominator = report.pnp_ok == 0 ? 1.0 : static_cast<double>(report.pnp_ok);
     if (!report.best)
     {
         DUST_LOG_DBG("vision", "fps=%.1f taken=%llu dropped=%llu raw=25200 score=%llu nms=%llu accepted=%llu reject(conf/color/type/geometry)=%llu/%llu/%llu/%llu max_obj=%.3f ms(pre/infer/post/age)=%.2f/%.2f/%.2f/%.2f target=none", report.frames / elapsed, static_cast<unsigned long long>(sub_camera_to.Taken()), static_cast<unsigned long long>(sub_camera_to.Dropped()), static_cast<unsigned long long>(report.score_passed), static_cast<unsigned long long>(report.nms_kept), static_cast<unsigned long long>(report.accepted), static_cast<unsigned long long>(report.rejected_confidence), static_cast<unsigned long long>(report.rejected_color), static_cast<unsigned long long>(report.rejected_label_type), static_cast<unsigned long long>(report.rejected_geometry), report.max_objectness, report.preprocess_ms / denominator, report.inference_ms / denominator, report.postprocess_ms / denominator, report.frame_age_ms / denominator);
-        return;
+    }
+    else
+    {
+        const DetectedArmor& armor = *report.best;
+        const auto& corners = armor.GetCorners();
+        DUST_LOG_DBG("vision", "fps=%.1f taken=%llu dropped=%llu raw=25200 score=%llu nms=%llu accepted=%llu reject(conf/color/type/geometry)=%llu/%llu/%llu/%llu max_obj=%.3f ms(pre/infer/post/age)=%.2f/%.2f/%.2f/%.2f target=%s/%s conf=%.3f corners=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)", report.frames / elapsed, static_cast<unsigned long long>(sub_camera_to.Taken()), static_cast<unsigned long long>(sub_camera_to.Dropped()), static_cast<unsigned long long>(report.score_passed), static_cast<unsigned long long>(report.nms_kept), static_cast<unsigned long long>(report.accepted), static_cast<unsigned long long>(report.rejected_confidence), static_cast<unsigned long long>(report.rejected_color), static_cast<unsigned long long>(report.rejected_label_type), static_cast<unsigned long long>(report.rejected_geometry), report.max_objectness, report.preprocess_ms / denominator, report.inference_ms / denominator, report.postprocess_ms / denominator, report.frame_age_ms / denominator, ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence(), corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y);
     }
 
-    const DetectedArmor& armor = *report.best;
-    const auto& corners = armor.GetCorners();
-    DUST_LOG_DBG("vision", "fps=%.1f taken=%llu dropped=%llu raw=25200 score=%llu nms=%llu accepted=%llu reject(conf/color/type/geometry)=%llu/%llu/%llu/%llu max_obj=%.3f ms(pre/infer/post/age)=%.2f/%.2f/%.2f/%.2f target=%s/%s conf=%.3f corners=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)", report.frames / elapsed, static_cast<unsigned long long>(sub_camera_to.Taken()), static_cast<unsigned long long>(sub_camera_to.Dropped()), static_cast<unsigned long long>(report.score_passed), static_cast<unsigned long long>(report.nms_kept), static_cast<unsigned long long>(report.accepted), static_cast<unsigned long long>(report.rejected_confidence), static_cast<unsigned long long>(report.rejected_color), static_cast<unsigned long long>(report.rejected_label_type), static_cast<unsigned long long>(report.rejected_geometry), report.max_objectness, report.preprocess_ms / denominator, report.inference_ms / denominator, report.postprocess_ms / denominator, report.frame_age_ms / denominator, ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence(), corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y);
+    // 位姿单独一行：err 是重投影、dist 是板心距离，做距离核对时只盯这一行
+    DUST_LOG_DBG("vision", "pnp ok=%llu invalid=%llu err=%.3fpx dist=%.3fm", static_cast<unsigned long long>(report.pnp_ok), static_cast<unsigned long long>(report.pnp_invalid), report.pnp_reprojection_px / pnp_denominator, report.pnp_distance_m / pnp_denominator);
 }
 
 /**
@@ -341,8 +455,9 @@ static void Task(void*, void*, void*)
             break;
         }
 
-        // 原图只做浅拷贝，识别结果和图像始终属于同一帧；显示侧需要绘制时再 clone
-        topic::vision_to::pub_vision_to_.Publish({message.image, message.timestamp, std::move(result.armors), processing_ms});
+        // 位姿在这一帧内解完并直接描在发布帧上；原图不动，显示侧照旧只转发
+        cv::Mat overlay = DrawPoses(message.image, result.armors, report);
+        topic::vision_to::pub_vision_to_.Publish({overlay, message.timestamp, std::move(result.armors), processing_ms});
 
         // 日志每秒汇总一次，避免逐帧输出影响实时识别
         const double elapsed = std::chrono::duration<double>(now - last_report).count();

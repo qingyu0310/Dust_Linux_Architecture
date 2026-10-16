@@ -19,19 +19,29 @@ add_library(framework_algorithm INTERFACE)
 target_include_directories(framework_algorithm INTERFACE ${PROJECT_SOURCE_DIR})
 target_link_libraries(framework_algorithm INTERFACE Eigen3::Eigen)
 
-if(CONFIG_DUST_VISION_YOLO)
-    add_library(framework_vision STATIC
-        algorithm/vision/core/detections.cpp
-        algorithm/vision/core/light_bar.cpp
-        algorithm/vision/detect/model_decode.cpp
-        algorithm/vision/detect/armor_detector.cpp)
+if(CONFIG_DUST_VISION_YOLO OR CONFIG_DUST_VISION_POSE)
+    add_library(framework_vision STATIC)
+    if(CONFIG_DUST_VISION_YOLO)
+        target_sources(framework_vision PRIVATE
+            algorithm/vision/core/detections.cpp
+            algorithm/vision/core/light_bar.cpp
+            algorithm/vision/detect/model_decode.cpp
+            algorithm/vision/detect/armor_detector.cpp)
+    endif()
     if(CONFIG_DUST_VISION_YOLO_REFINER)
         target_sources(framework_vision PRIVATE algorithm/vision/refine/armor_refiner.cpp)
     endif()
+    if(CONFIG_DUST_VISION_POSE)
+        target_sources(framework_vision PRIVATE algorithm/vision/pose/armor_pose.cpp)
+    endif()
     target_include_directories(framework_vision PUBLIC ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(framework_vision
-        PUBLIC opencv_core opencv_imgproc opencv_dnn
-        PRIVATE CUDA::cudart TensorRT::nvinfer)
+    target_link_libraries(framework_vision PUBLIC opencv_core opencv_imgproc)
+    if(CONFIG_DUST_VISION_YOLO)
+        target_link_libraries(framework_vision PUBLIC opencv_dnn PRIVATE CUDA::cudart TensorRT::nvinfer)
+    endif()
+    if(CONFIG_DUST_VISION_POSE)
+        target_link_libraries(framework_vision PUBLIC opencv_calib3d)
+    endif()
     target_compile_options(framework_vision PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
