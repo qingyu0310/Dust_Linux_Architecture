@@ -1,3 +1,0 @@
-# test 线程参数，thread_init() 启动时读取。
-heartbeat_ms: 1000        # 心跳间隔，单位 ms
-run_duration_ms: 0       # 0=等待退出信号；正数=指定运行时长，单位 ms

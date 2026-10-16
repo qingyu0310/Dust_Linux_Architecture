@@ -64,6 +64,10 @@ if(CONFIG_DUST_VISION_YOLO)
     find_package(OpenCV REQUIRED COMPONENTS dnn)
 endif()
 
+if(CONFIG_DUST_CALIB)
+    find_package(OpenCV REQUIRED COMPONENTS calib3d imgcodecs)
+endif()
+
 # ============================================================================
 #
 # 视觉依赖（CONFIG_DUST_VISION_YOLO）：CUDA / TensorRT

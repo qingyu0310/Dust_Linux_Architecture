@@ -216,7 +216,7 @@ bool thread_init()
     // 这里的上下限只防手滑，不是硬件上限：帧率上限由分辨率/曝光/链路带宽决定，
     // 曝光上限由设备节点决定（都靠设备自己报错或实际帧率体现，别在这儿替设备做主）
     config.exposure_ms = yaml.GetInt("exposure_us",      1,     10000000) / 1000.0;
-    config.gain        = yaml.GetInt("gain_db",          0,     48);
+    config.gain        = yaml.GetDouble("gain_db",       0.0,   48.0);
     config.frame_rate  = yaml.GetInt("frame_rate",       1,     1000);
     config.timeout_ms  = yaml.GetInt("timeout_ms",       1,     1000);
     max_frame_gap_ms_  = yaml.GetInt("max_frame_gap_ms", 1000,  60000);

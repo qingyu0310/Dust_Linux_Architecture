@@ -1,7 +1,7 @@
 /**
  * @file trd_display.cpp
  * @author qingyu
- * @brief 显示线程 — 订阅视觉结果，在主线程回调里显示同帧识别叠加
+ * @brief 显示线程 — 订阅上游图像流，在主线程回调里原样显示
  * @version 0.1
  * @date 2026-10-13
  *
@@ -14,24 +14,16 @@
 #include "framework/init/Init_entry.hpp"
 #include "framework/init/System_startup.hpp"
 #include "framework/topic/vision_to/vision_to.hpp"
-#include <algorithm>
 #include <chrono>
 #include <condition_variable>
-#include <cstdio>
 #include <mutex>
+#include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 #include <stdexcept>
 
 namespace thread::display
 {
 
-using algorithm::vision::ArmorLabel;
-using algorithm::vision::DetectedArmor;
-using algorithm::vision::TeamColor;
-using namespace topic::vision_to;
-
-static Subscriber sub_vision_to {pub_vision_to_};   // 本线程的识别结果订阅者，只由主线程回调使用
 static bool window_open_ = false;                            // 窗口状态，仅主线程访问
 static int  wait_ms_ = 50;                                   // 无新帧时回调最长等待，只为泵 Qt 事件
 
@@ -41,73 +33,30 @@ static std::condition_variable show_condition_;              // 开关变化时�
 
 static constexpr char kWindowName[] = "Camera";
 
+// 只订 vision_to：识别和标定都往这条通道发叠加好的帧，显示侧不做像素处理。
+static topic::vision_to::Subscriber sub_vision_to {topic::vision_to::pub_vision_to_};
+
 namespace
 {
 
-const char* ColorName(TeamColor color)
+/**
+ * @brief 从 vision_to 取一帧识别或标定发布的结果
+ *
+ * 本线程不生成也不改图像，叠加内容由发布方画好，显示只做转发。
+ *
+ * @param image 输出取到的图像
+ * @return true 取到一帧；false 本次没有新帧
+ */
+bool TakeFrame(cv::Mat& image)
 {
-    switch (color)
+    topic::vision_to::Message vision;
+    if (!sub_vision_to.Wait(vision, std::chrono::milliseconds(1)))
     {
-        case TeamColor::Red:
-            return "red";
-        case TeamColor::Blue:
-            return "blue";
-        default:
-            return "unknown";
-    }
-}
-
-const char* LabelName(ArmorLabel label)
-{
-    switch (label)
-    {
-        case ArmorLabel::One:
-            return "1";
-        case ArmorLabel::Two:
-            return "2";
-        case ArmorLabel::Three:
-            return "3";
-        case ArmorLabel::Four:
-            return "4";
-        case ArmorLabel::Five:
-            return "5";
-        case ArmorLabel::Sentry:
-            return "sentry";
-        case ArmorLabel::Outpost:
-            return "outpost";
-        case ArmorLabel::Base:
-            return "base";
-        default:
-            return "not_armor";
-    }
-}
-
-cv::Scalar DrawColor(TeamColor color)
-{
-    if (color == TeamColor::Red)
-    {
-        return {0, 0, 255};
-    }
-    if (color == TeamColor::Blue)
-    {
-        return {255, 0, 0};
-    }
-    return {255, 255, 255};
-}
-
-void DrawArmor(cv::Mat& image, const DetectedArmor& armor)
-{
-    const auto& corners = armor.GetCorners();
-    const cv::Scalar color = DrawColor(armor.GetColor());
-    for (std::size_t index = 0; index < corners.size(); ++index)
-    {
-        cv::line(image, corners[index], corners[(index + 1) % corners.size()], color, 2, cv::LINE_AA);
+        return false;
     }
 
-    char text[64];
-    std::snprintf(text, sizeof(text), "%s/%s %.2f", ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence());
-    const cv::Point2f text_position(corners[0].x, std::max(18.0f, corners[0].y - 6.0f));
-    cv::putText(image, text, text_position, cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv::LINE_AA);
+    image = vision.source_image;
+    return true;
 }
 
 } // namespace
@@ -149,7 +98,7 @@ static void SetShowFromVar(const debug::VarEntry& entry, double value, void* con
 }
 
 /**
- * @brief 主线程回调：等新识别结果、绘制、显示并处理窗口事件
+ * @brief 主线程回调：等上游图像、原样显示并处理窗口事件
  *
  * 创建、显示、按键处理和销毁均在主线程执行，满足 Qt GUI 线程约束。
  * 显示关闭时销毁窗口并阻塞等待重新打开，不做像素处理。
@@ -171,9 +120,8 @@ static void Display()
         return;
     }
 
-    Message message;
-    // 等新识别结果：消息自带模型实际处理的原帧，角点不会套到另一时刻的相机图像上
-    if (sub_vision_to.Wait(message, std::chrono::milliseconds(wait_ms_)))
+    cv::Mat image;
+    if (TakeFrame(image))
     {
         if (!window_open_)
         {
@@ -181,16 +129,8 @@ static void Display()
             window_open_ = true;
         }
 
-        cv::Mat display_image = message.source_image;
-        if (!message.armors.empty())
-        {
-            display_image = message.source_image.clone();
-            for (const DetectedArmor& armor : message.armors)
-            {
-                DrawArmor(display_image, armor);
-            }
-        }
-        cv::imshow(kWindowName, display_image);
+        // 原样显示：叠加内容由发布方画好，显示侧不做像素处理
+        cv::imshow(kWindowName, image);
     }
 
     if (window_open_)

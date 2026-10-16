@@ -1,4 +1,4 @@
-# algorithm/Kconfig —— 算法能力：YOLO 装甲板检测、局部灯条精修。
+# algorithm/Kconfig —— 算法能力：圆点阵标定、YOLO 装甲板检测、局部灯条精修。
 # 架构层能力默认 n，由业务层 select 拉起。
 
 config DUST_FLT_KALMAN
@@ -25,6 +25,12 @@ config DUST_MATH_ANGLE
     default n
     help
       Angle wrap/compare helpers (algorithm/math/angle.hpp).
+
+config DUST_CALIB
+    bool "circle-grid camera calibration"
+    default n
+    help
+      Planar circle-grid intrinsic solver and reprojection check (algorithm/calib).
 
 config DUST_VISION_YOLO
     bool "YOLO armor detection"

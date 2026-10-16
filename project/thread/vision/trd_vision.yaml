@@ -20,3 +20,20 @@ min_light_ratio: 1.5
 max_light_ratio: 20.0
 max_light_tilt_deg: 45.0
 max_endpoint_distance_px: 15.0
+
+# ---- 相机内参与畸变：由标定组件产出，这里是唯一读它的地方 ----
+# 标定跑完日志按同样的键名逐行打印，形如 `[inf] calib: camera_fx: 1803.947`，
+# 取 "calib: " 后面那段替换下面 12 行即可。12 个键必须齐全。
+# 当前值来自本机 2026-10-16 的标定结果（重投影误差 0.1062 px）。
+image_width: 1440
+image_height: 1080
+camera_fx: 1799.539711
+camera_fy: 1800.364749
+camera_cx: 722.8841479
+camera_cy: 504.3663714
+distort_k1: -0.07677082222
+distort_k2: 0.1417360699
+distort_p1: -0.0004933148161
+distort_p2: 0.001394902737
+distort_k3: 0
+reprojection_error_px: 0.106212

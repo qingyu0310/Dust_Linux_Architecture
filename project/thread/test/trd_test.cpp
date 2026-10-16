@@ -1,7 +1,7 @@
 /**
  * @file trd_test.cpp
  * @author qingyu
- * @brief 基础业务装配：初始化注册、心跳线程与退出清理
+ * @brief 测试线程：初始化注册与当前这一条测试
  * @version 0.1
  * @date 2026-10-12
  *
@@ -9,37 +9,118 @@
  *
  */
 
-#include "framework/cmd/config/config.hpp"
+#include "framework/algorithm/calib/camera_calib.hpp"
 #include <algorithm>
 #include "framework/init/Init_entry.hpp"
-#include "framework/init/System_startup.hpp"
-#include "framework/init/thread.hpp"
 #include "framework/cmd/shell/log.hpp"
+#include <cmath>
+#include <cstddef>
+#include <opencv2/calib3d.hpp>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace thread::test
 {
 /**
- * @brief test 线程参数，只由本线程初始化项读取和校验
+ * @brief 用合成观测反解一遍内参，验证算法层的求解链
+ *
+ * 内参与畸变取参考那台相机的值（同一 USB 型号、同一 1440×1080），按六组板姿态用
+ * projectPoints 造出圆心像素坐标，再喂给 SolveIntrinsics。输入本来就是用这组内参生成的，
+ * 解回去必须落在同一组数上；解不回去说明点序、单位或 flag 写错了，跟相机没关系。
+ *
+ * 板点在这里重新排一遍而不去调算法层的内部函数：合成样本和求解器各排一次，顺序约定
+ * 写错才暴露得出来。真机上的点序（findCirclesGrid 的返回顺序）只能靠实际标定验证。
+ *
+ * @return true 反解结果与设定值一致
  */
-struct Params
+static bool CheckCalibration()
 {
-    int heartbeat_ms;    // 心跳间隔，单位 ms，范围 [1, 60000]
-    int run_duration_ms; // 运行时长，单位 ms；0=等待退出信号
-};
+    const algorithm::calib::Board board;
+    const cv::Size image_size(1440, 1080);
 
-static Params params_{};
-static init::Thread thread_{};
+    const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << 1808.8304696430803, 0.0, 713.70459283498224,
+                                                          0.0, 1808.0411873540195, 566.09347726083934,
+                                                          0.0, 0.0, 1.0);
+    const cv::Mat distort_coeffs = (cv::Mat_<double>(1, 5) << -0.073241403353599299, 0.14495759982904788,
+                                                             0.00028937879061362732, -0.00026770913811837289, 0.0);
+
+    std::vector<cv::Point3f> board_points;
+    board_points.reserve(static_cast<std::size_t>(board.cols) * static_cast<std::size_t>(board.rows));
+    for (std::int32_t row = 0; row < board.rows; ++row)
+    {
+        for (std::int32_t col = 0; col < board.cols; ++col)
+        {
+            board_points.emplace_back(static_cast<float>(col * board.center_distance_mm), static_cast<float>(row * board.center_distance_mm), 0.0f);
+        }
+    }
+
+    // 板心先挪到光轴附近，z 取 700–950 mm（与规划的 0.5–1.0 m 工作距离同量级）；
+    // 每组都带倾角，只靠平移也能凑出观测，那样验不到倾斜方向的约束
+    const double poses[6][6] = {
+        { 0.00,  0.00, 0.00, -160.0, -100.0, 700.0},
+        { 0.30,  0.30, 0.00, -160.0, -100.0, 800.0},
+        {-0.30,  0.30, 0.00, -160.0, -100.0, 800.0},
+        {-0.30, -0.30, 0.00, -160.0, -100.0, 900.0},
+        { 0.30, -0.30, 0.00, -160.0, -100.0, 900.0},
+        { 0.45,  0.15, 0.20, -160.0, -100.0, 950.0},
+    };
+
+    std::vector<std::vector<cv::Point2f>> image_points;
+    image_points.reserve(6);
+    for (const auto& pose : poses)
+    {
+        const cv::Vec3d rotation(pose[0], pose[1], pose[2]);
+        const cv::Vec3d translation(pose[3], pose[4], pose[5]);
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(board_points, rotation, translation, camera_matrix, distort_coeffs, projected);
+        image_points.push_back(std::move(projected));
+    }
+
+    const std::optional<algorithm::calib::Intrinsics> solved = algorithm::calib::SolveIntrinsics(board, image_points, image_size);
+    if (!solved)
+    {
+        DUST_LOG_ERR("calib selfcheck: SolveIntrinsics returned nothing");
+        return false;
+    }
+
+    // 结构项（0 和 1）没有相对误差可算，分母统一取 max(|期望|, 1)；畸变系数一律按绝对值比
+    double matrix_error = 0.0;
+    for (std::int32_t row = 0; row < 3; ++row)
+    {
+        for (std::int32_t col = 0; col < 3; ++col)
+        {
+            const double expected = camera_matrix.at<double>(row, col);
+            matrix_error = std::max(matrix_error, std::abs(solved->camera_matrix[row * 3 + col] - expected) / std::max(std::abs(expected), 1.0));
+        }
+    }
+
+    double coefficient_error = 0.0;
+    for (std::int32_t index = 0; index < 5; ++index)
+    {
+        coefficient_error = std::max(coefficient_error, std::abs(solved->distort_coeffs[index] - distort_coeffs.at<double>(0, index)));
+    }
+
+    // 合成观测没有噪声，但圆心存成 float，量化台阶约 1e-4 px，反解误差的地板在 1e-6 量级；
+    // 1e-3 是拿来抓"点序/单位/flag 写错"那类量级 1e-1 的错，不是精度指标
+    const bool passed = matrix_error < 1.0e-3 && coefficient_error < 1.0e-3 && solved->reprojection_error_px < 1.0e-3;
+
+    DUST_LOG_INF("calib selfcheck %s: fx=%.4f fy=%.4f cx=%.4f cy=%.4f", passed ? "ok" : "failed", solved->camera_matrix[0],
+                 solved->camera_matrix[4], solved->camera_matrix[2], solved->camera_matrix[5]);
+    DUST_LOG_INF("calib selfcheck: matrix=%.3e coef=%.3e reprojection=%.3e px", matrix_error, coefficient_error, solved->reprojection_error_px);
+
+    return passed;
+}
 
 /**
- * @brief 初始化基础应用，当前不访问摄像头设备
+ * @brief 跑当前这一条测试；失败按 HaltOnFail 中止启动
  */
 bool thread_init()
 {
-    cmd::config::Config yaml;
-    yaml.Load("thread/test/trd_test.yaml", {"heartbeat_ms", "run_duration_ms"});
-
-    params_.heartbeat_ms = yaml.GetInt("heartbeat_ms", 1, 60000);
-    params_.run_duration_ms = yaml.GetInt("run_duration_ms", 0, 86400000);
+    if (!CheckCalibration())
+    {
+        return false;
+    }
 
     DUST_LOG_OK("test init");
     return true;
@@ -53,65 +134,6 @@ void Release()
     DUST_LOG_INF("application resources released");
 }
 
-/**
- * @brief 基础线程任务：可中断等待、心跳与有限时长停止
- */
-static void Task(void*, void*, void*)
-{
-    const auto begin = std::chrono::steady_clock::now();
-
-    for (;;)
-    {
-        auto delay = std::chrono::milliseconds(params_.heartbeat_ms);
-
-        if (params_.run_duration_ms > 0)
-        {
-            const auto elapsed   = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin);
-            const auto remaining = std::chrono::milliseconds(params_.run_duration_ms) - elapsed;
-
-            if (remaining.count() <= 0)
-            {
-                System_RequestStop();
-                break;
-            }
-            delay = std::min(delay, remaining);
-        }
-
-        if (thread_.WaitForStop(delay))
-        {
-            break;
-        }
-        DUST_LOG_DBG("test", "application heartbeat");
-    }
-}
-
-/**
- * @brief 启动线程，任务逻辑由独立 Task 函数承载
- */
-bool thread_start()
-{
-    thread_.Start(Task, nullptr, "test");
-    return true;
-}
-
-/**
- * @brief 通知业务线程停止并解除等待
- */
-void thread_stop()
-{
-    thread_.RequestStop();
-}
-
-/**
- * @brief 等待业务线程退出，确保后续资源释放安全
- */
-void thread_join()
-{
-    thread_.Join();
-    DUST_LOG_OK("application thread joined");
-}
-
 REGISTER_INIT(thread_init, AppInit, High, HaltOnFail, Release, "test_init");
-REGISTER_THREAD(thread_start, AppThread, thread_stop, thread_join, "test_start");
 
 } // namespace thread::test

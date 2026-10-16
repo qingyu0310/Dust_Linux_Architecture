@@ -11,7 +11,7 @@ find_package(yaml-cpp REQUIRED)
 
 # ============================================================================
 #
-# algorithm：算法能力（纯头文件能力 + 视觉静态库）
+# algorithm：算法能力（纯头文件能力 + 视觉、标定静态库）
 #
 # ============================================================================
 
@@ -33,6 +33,14 @@ if(CONFIG_DUST_VISION_YOLO)
         PUBLIC opencv_core opencv_imgproc opencv_dnn
         PRIVATE CUDA::cudart TensorRT::nvinfer)
     target_compile_options(framework_vision PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(CONFIG_DUST_CALIB)
+    add_library(framework_calib STATIC
+        algorithm/calib/camera_calib.cpp)
+    target_include_directories(framework_calib PUBLIC ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(framework_calib PUBLIC opencv_core opencv_calib3d)
+    target_compile_options(framework_calib PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ============================================================================

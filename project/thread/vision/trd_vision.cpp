@@ -37,126 +37,26 @@ using namespace algorithm::vision;
 using namespace topic::camera_to;
 using namespace init;
 
-static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
-
-#ifdef CONFIG_DUST_VISION_YOLO_REFINER
-static std::unique_ptr<ArmorRefiner> refiner_;                          // 可选的局部灯条角点精修器
-#endif
-
-static Subscriber sub_camera_to {pub_camera_to_};             // vision 独占的相机帧订阅游标
-
-static Thread thread_ {};                                               // 识别工作线程
-
 /**
- * @brief 把装甲板颜色转换为日志字符串
- * @param color 工程颜色枚举
- * @return 固定字符串 red、blue 或 unknown
- */
-static const char* ColorName(TeamColor color)
-{
-    switch (color)
-    {
-        case TeamColor::Red:
-            return "red";
-        case TeamColor::Blue:
-            return "blue";
-        default:
-            return "unknown";
-    }
-}
-
-/**
- * @brief 把装甲板标签转换为日志字符串
- * @param label 工程标签枚举
- * @return 固定类别字符串
- */
-static const char* LabelName(ArmorLabel label)
-{
-    switch (label)
-    {
-        case ArmorLabel::One:
-            return "1";
-        case ArmorLabel::Two:
-            return "2";
-        case ArmorLabel::Three:
-            return "3";
-        case ArmorLabel::Four:
-            return "4";
-        case ArmorLabel::Five:
-            return "5";
-        case ArmorLabel::Sentry:
-            return "sentry";
-        case ArmorLabel::Outpost:
-            return "outpost";
-        case ArmorLabel::Base:
-            return "base";
-        default:
-            return "not_armor";
-    }
-}
-
-/**
- * @brief 从视觉线程 YAML 读取检测器参数
- */
-static void LoadDetectorConfig(ArmorDetector::Config& detector_config)
-{
-    cmd::config::Config yaml;
-    yaml.Load("thread/vision/trd_vision.yaml",
-              {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
-              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px"});
-
-    detector_config.engine_path = yaml.GetPath("engine_path");
-    if (detector_config.engine_path.empty())
-    {
-        throw std::runtime_error("vision config: engine_path must not be empty");
-    }
-    detector_config.cuda_device          = yaml.GetInt("cuda_device", 0, std::numeric_limits<int>::max());
-    detector_config.nms_threshold        = static_cast<float>(yaml.GetDouble("nms_threshold", 0.0, 1.0));
-    detector_config.score_threshold      = static_cast<float>(yaml.GetDouble("score_threshold", 0.0, 1.0));
-    detector_config.confidence_threshold = static_cast<float>(yaml.GetDouble("confidence_threshold", 0.0, 1.0));
-}
-
-#ifdef CONFIG_DUST_VISION_YOLO_REFINER
-/**
- * @brief 从视觉线程 YAML 读取精修参数
+ * @brief 相机内参与畸变，由标定组件产出、从本线程 YAML 读入
  *
- * 精修器编进程序就生效，参数必须齐备。
+ * 标定本身不用这两个量，只有把像素反投影到相机系时才需要，所以它住在识别线程这里。
  */
-static void LoadRefinerConfig(ArmorRefiner::Config& refiner_config)
+struct CameraIntrinsics
 {
-    cmd::config::Config yaml;
-    yaml.Load("thread/vision/trd_vision.yaml", 
-              {"engine_path", "cuda_device", "score_threshold", "confidence_threshold", "nms_threshold"},
-              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio", "max_light_tilt_deg", "max_endpoint_distance_px"});
-
-    const char* const refiner_keys[] = { 
-        "brightness_threshold", 
-        "min_light_length_px", 
-        "min_light_ratio",
-        "max_light_ratio", 
-        "max_light_tilt_deg", 
-        "max_endpoint_distance_px"
-    };
-    for (const char* key : refiner_keys)
-    {
-        if (!yaml.Has(key))
-        {
-            throw std::runtime_error(std::string("vision config: missing refiner field: ") + key);
-        }
-    }
-
-    refiner_config.brightness_threshold = yaml.GetInt("brightness_threshold", 0, 255);
-    refiner_config.min_light_ratio      = static_cast<float>(yaml.GetDouble("min_light_ratio",     0.0, 1000000.0));
-    refiner_config.max_light_ratio      = static_cast<float>(yaml.GetDouble("max_light_ratio",     0.0, 1000000.0));
-    refiner_config.min_light_length_px  = static_cast<float>(yaml.GetDouble("min_light_length_px", 0.0, 1000000.0));
-
-    const double max_tilt_deg = yaml.GetDouble("max_light_tilt_deg", 0.0, 90.0);
-    refiner_config.max_light_tilt_rad       = static_cast<float>(max_tilt_deg * 3.14159265358979323846 / 180.0);
-    refiner_config.max_endpoint_distance_px = static_cast<float>(yaml.GetDouble("max_endpoint_distance_px", 0.0, 1000000.0));
-
-    refiner_config.Validate();
-}
-#endif
+    std::int32_t image_width {0};               // 标定时的图像宽度，单位 pixel
+    std::int32_t image_height {0};              // 标定时的图像高度，单位 pixel
+    double       fx {0.0};                      // x 方向焦距，单位 pixel
+    double       fy {0.0};                      // y 方向焦距，单位 pixel
+    double       cx {0.0};                      // 主点横坐标，单位 pixel
+    double       cy {0.0};                      // 主点纵坐标，单位 pixel
+    double       k1 {0.0};                      // 径向畸变一阶系数
+    double       k2 {0.0};                      // 径向畸变二阶系数
+    double       p1 {0.0};                      // 切向畸变一阶系数
+    double       p2 {0.0};                      // 切向畸变二阶系数
+    double       k3 {0.0};                      // 径向畸变三阶系数，标定时固定为 0
+    double       reprojection_error_px {0.0};   // 标定时的重投影误差，单位 pixel
+};
 
 /**
  * @brief 一秒统计窗口
@@ -221,6 +121,150 @@ struct ReportWindow
         *this = ReportWindow {};
     }
 };
+
+static CameraIntrinsics camera_intrinsics_ {};                          // 本线程读入的内参，后续 PnP 使用
+
+static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
+
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+static std::unique_ptr<ArmorRefiner> refiner_;                          // 可选的局部灯条角点精修器
+#endif
+
+static Subscriber sub_camera_to {pub_camera_to_};             // vision 独占的相机帧订阅游标
+
+static Thread thread_ {};                                               // 识别工作线程
+
+/**
+ * @brief 把装甲板颜色转换为日志字符串
+ * @param color 工程颜色枚举
+ * @return 固定字符串 red、blue 或 unknown
+ */
+static const char* ColorName(TeamColor color)
+{
+    switch (color)
+    {
+        case TeamColor::Red:
+            return "red";
+        case TeamColor::Blue:
+            return "blue";
+        default:
+            return "unknown";
+    }
+}
+
+/**
+ * @brief 把装甲板标签转换为日志字符串
+ * @param label 工程标签枚举
+ * @return 固定类别字符串
+ */
+static const char* LabelName(ArmorLabel label)
+{
+    switch (label)
+    {
+        case ArmorLabel::One:
+            return "1";
+        case ArmorLabel::Two:
+            return "2";
+        case ArmorLabel::Three:
+            return "3";
+        case ArmorLabel::Four:
+            return "4";
+        case ArmorLabel::Five:
+            return "5";
+        case ArmorLabel::Sentry:
+            return "sentry";
+        case ArmorLabel::Outpost:
+            return "outpost";
+        case ArmorLabel::Base:
+            return "base";
+        default:
+            return "not_armor";
+    }
+}
+
+/**
+ * @brief 一次读完视觉线程 YAML：检测器参数与相机内参
+ *
+ * 内参那批键由标定组件打印、人粘进本 YAML，是标定与视觉之间唯一的接口；
+ * 缺键或越界都会在 Load 里直接报错，不带默认值悄悄跑。
+ */
+static void LoadVisionConfig(ArmorDetector::Config& detector_config)
+{
+    cmd::config::Config yaml;
+    yaml.Load("thread/vision/trd_vision.yaml",
+              {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px"});
+
+    detector_config.engine_path = yaml.GetPath("engine_path");
+    if (detector_config.engine_path.empty())
+    {
+        throw std::runtime_error("vision config: engine_path must not be empty");
+    }
+    detector_config.cuda_device          = yaml.GetInt("cuda_device", 0, std::numeric_limits<int>::max());
+    detector_config.nms_threshold        = static_cast<float>(yaml.GetDouble("nms_threshold", 0.0, 1.0));
+    detector_config.score_threshold      = static_cast<float>(yaml.GetDouble("score_threshold", 0.0, 1.0));
+    detector_config.confidence_threshold = static_cast<float>(yaml.GetDouble("confidence_threshold", 0.0, 1.0));
+
+    camera_intrinsics_.image_width           = yaml.GetInt("image_width",   1,          100000);
+    camera_intrinsics_.image_height          = yaml.GetInt("image_height",  1,          100000);
+
+    camera_intrinsics_.fx                    = yaml.GetDouble("camera_fx",  1.0,        1000000.0);
+    camera_intrinsics_.fy                    = yaml.GetDouble("camera_fy",  1.0,        1000000.0);
+    camera_intrinsics_.cx                    = yaml.GetDouble("camera_cx",  -1000000.0, 1000000.0);
+    camera_intrinsics_.cy                    = yaml.GetDouble("camera_cy",  -1000000.0, 1000000.0);
+
+    camera_intrinsics_.k1                    = yaml.GetDouble("distort_k1", -1000.0,    1000.0);
+    camera_intrinsics_.k2                    = yaml.GetDouble("distort_k2", -1000.0,    1000.0);
+    camera_intrinsics_.p1                    = yaml.GetDouble("distort_p1", -1000.0,    1000.0);
+    camera_intrinsics_.p2                    = yaml.GetDouble("distort_p2", -1000.0,    1000.0);
+    camera_intrinsics_.k3                    = yaml.GetDouble("distort_k3", -1000.0,    1000.0);
+
+    camera_intrinsics_.reprojection_error_px = yaml.GetDouble("reprojection_error_px", 0.0, 1000000.0);
+
+    DUST_LOG_INF("vision: intrinsics %dx%d fx=%.3f fy=%.3f cx=%.3f cy=%.3f", camera_intrinsics_.image_width, camera_intrinsics_.image_height, camera_intrinsics_.fx, camera_intrinsics_.fy, camera_intrinsics_.cx, camera_intrinsics_.cy);
+}
+
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+/**
+ * @brief 从视觉线程 YAML 读取精修参数
+ *
+ * 精修器编进程序就生效，参数必须齐备。
+ */
+static void LoadRefinerConfig(ArmorRefiner::Config& refiner_config)
+{
+    cmd::config::Config yaml;
+    yaml.Load("thread/vision/trd_vision.yaml",
+              {"engine_path", "cuda_device", "score_threshold", "confidence_threshold", "nms_threshold"},
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio", "max_light_tilt_deg", "max_endpoint_distance_px"});
+
+    const char* const refiner_keys[] = {
+        "brightness_threshold",
+        "min_light_length_px",
+        "min_light_ratio",
+        "max_light_ratio",
+        "max_light_tilt_deg",
+        "max_endpoint_distance_px"
+    };
+    for (const char* key : refiner_keys)
+    {
+        if (!yaml.Has(key))
+        {
+            throw std::runtime_error(std::string("vision config: missing refiner field: ") + key);
+        }
+    }
+
+    refiner_config.brightness_threshold = yaml.GetInt("brightness_threshold", 0, 255);
+    refiner_config.min_light_ratio      = static_cast<float>(yaml.GetDouble("min_light_ratio",     0.0, 1000000.0));
+    refiner_config.max_light_ratio      = static_cast<float>(yaml.GetDouble("max_light_ratio",     0.0, 1000000.0));
+    refiner_config.min_light_length_px  = static_cast<float>(yaml.GetDouble("min_light_length_px", 0.0, 1000000.0));
+
+    const double max_tilt_deg = yaml.GetDouble("max_light_tilt_deg", 0.0, 90.0);
+    refiner_config.max_light_tilt_rad       = static_cast<float>(max_tilt_deg * 3.14159265358979323846 / 180.0);
+    refiner_config.max_endpoint_distance_px = static_cast<float>(yaml.GetDouble("max_endpoint_distance_px", 0.0, 1000000.0));
+
+    refiner_config.Validate();
+}
+#endif
 
 /**
  * @brief 输出一条识别窗口汇总日志
@@ -319,7 +363,7 @@ static void Task(void*, void*, void*)
 bool thread_init()
 {
     ArmorDetector::Config detector_config;
-    LoadDetectorConfig(detector_config);
+    LoadVisionConfig(detector_config);
     detector_ = std::make_unique<ArmorDetector>(detector_config);
 
 #ifdef CONFIG_DUST_VISION_YOLO_REFINER
@@ -334,20 +378,6 @@ bool thread_init()
 
     DUST_LOG_INF("[vision] TensorRT device=%d engine=%s score=%.3f confidence=%.3f nms=%.3f refiner=%s input=%s/%s [1,3,%d,%d] output=%s FP32 [1,%d,%d]", detector_config.cuda_device, detector_config.engine_path.c_str(), detector_config.score_threshold, detector_config.confidence_threshold, detector_config.nms_threshold, refiner_state, detector_->GetInputName().c_str(), detector_->GetInputTypeName().c_str(), detector_->GetInputHeight(), detector_->GetInputWidth(), detector_->GetOutputName().c_str(), detector_->GetOutputRows(), detector_->GetOutputColumns());
     return true;
-}
-
-/**
- * @brief 在线程退出并 join 后释放 TensorRT/CUDA 资源
- */
-void Release()
-{
-#ifdef CONFIG_DUST_VISION_YOLO_REFINER
-{
-    refiner_.reset();
-}
-#endif
-    detector_.reset();
-    topic::vision_to::pub_vision_to_.Clear();
 }
 
 /**
@@ -378,6 +408,20 @@ void thread_stop()
 void thread_join()
 {
     thread_.Join();
+}
+
+/**
+ * @brief 在线程退出并 join 后释放 TensorRT/CUDA 资源
+ */
+void Release()
+{
+#ifdef CONFIG_DUST_VISION_YOLO_REFINER
+{
+    refiner_.reset();
+}
+#endif
+    detector_.reset();
+    topic::vision_to::pub_vision_to_.Clear();
 }
 
 REGISTER_INIT(thread_init, AppInit, High, HaltOnFail, Release, "vision_init");
