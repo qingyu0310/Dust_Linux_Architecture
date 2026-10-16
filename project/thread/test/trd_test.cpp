@@ -3,39 +3,32 @@
  * @author qingyu
  * @brief 测试线程：初始化注册与当前这一条测试
  * @version 0.1
- * @date 2026-10-16
+ * @date 2026-10-17
  *
  * @copyright Copyright (c) 2026
  *
  */
 
 #include "framework/algorithm/vision/pose/armor_pose.hpp"
+#include "framework/algorithm/vision/track/armor_tracker.hpp"
 #include "framework/init/Init_entry.hpp"
 #include "framework/cmd/shell/log.hpp"
-#include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstddef>
+#include <cstdint>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <optional>
-#include <vector>
 
 namespace thread::test
 {
+namespace
+{
+
 /**
- * @brief 用合成观测反解一遍单块装甲板位姿，验证物点、单位与 PnP 链
- *
- * 内参取本机标定值，按几组板姿态用 projectPoints 造出像素四点，再喂给 SolvePose。
- * 输入本来就是用这组物点生成的，解回去必须落回同一组数上：解不回来说明物点顺序、单位
- * 或 Rodrigues 用错了，跟相机没关系。
- *
- * 注意这一条**验不了板系的符号分配**：造样本和求解用的是同一份物点，y/z 谁在左谁在上
- * 都能自洽地回去。符号是否与实物板一致只能靠实拍（把板放在量好距离上比 ‖tvec‖）。
- *
- * @return true 反解位姿与设定值一致
+ * @brief 本机标定的内参与畸变
  */
-static bool CheckPose()
+algorithm::vision::CameraModel MakeCamera()
 {
     algorithm::vision::CameraModel camera;
     camera.fx = 1799.539711;
@@ -48,81 +41,123 @@ static bool CheckPose()
     camera.p2 = 0.001394902737;
     camera.k3 = 0.0;
 
-    const algorithm::vision::ArmorDimensions dimensions; // 缺省即实物尺寸
+    return camera;
+}
+
+/**
+ * @brief 造一帧观测：一辆车以给定半径和角速度自转，取面 0 的四点
+ *
+ * 车的旋转中心固定在相机系原点前方，只有转角随时间推进，所以真实半径是可以对答案的。
+ *
+ * @param camera 内参与畸变
+ * @param dimensions 板尺寸
+ * @param yaw_rad 当帧面 0 的转角
+ * @param radius_m 真实旋转半径
+ * @param center 旋转中心，相机系，单位 m
+ * @param corners 输出四点
+ * @return true 生成成功
+ */
+bool MakeObservation(const algorithm::vision::CameraModel& camera, const algorithm::vision::ArmorDimensions& dimensions,
+                     double yaw_rad, double radius_m, const Eigen::Vector3d& center, std::array<cv::Point2f, 4>& corners)
+{
     const std::optional<std::array<cv::Point3f, 4>> object_points = algorithm::vision::MakeObjectPoints(algorithm::vision::ArmorSize::Small, dimensions);
     if (!object_points)
     {
-        DUST_LOG_ERR("pose selfcheck: MakeObjectPoints returned nothing");
         return false;
     }
 
-    const std::vector<cv::Point3f> object_list(object_points->begin(), object_points->end());
-    const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << camera.fx, 0.0, camera.cx,
-                                                                        0.0, camera.fy, camera.cy,
-                                                                        0.0, 0.0, 1.0);
-    const cv::Mat distort_coeffs = (cv::Mat_<double>(1, 5) << camera.k1, camera.k2, camera.p1, camera.p2, camera.k3);
+    // 面 0 的中心 = 旋转中心 + r·法向，法向 n = (−cos a, 0, −sin a)，与跟踪器同一约定
+    const cv::Vec3d tvec(center.x() - radius_m * std::cos(yaw_rad),
+                         center.y(),
+                         center.z() - radius_m * std::sin(yaw_rad));
 
-    // 板心放在光轴附近的不同距离上，每组都带倾角：只靠正对光轴也能凑出观测，那样验不到倾斜。
-    // 距离覆盖实拍用过的 0.3~0.5 m 与更远的 1.0~2.0 m——近处的角点离主点远，畸变位移大，
-    // 若重投影只在近处涨，说明求解链没把畸变吃进去（若是网络角点噪声，近处远处都应一样）。
-    const double poses[5][6] = {
-        { 0.15,  0.10, 0.00, -0.03, -0.02, 0.3},
-        { 0.15,  0.10, 0.00, -0.04, -0.03, 0.4},
-        { 0.10,  0.10, 0.00, -0.05, -0.03, 0.5},
-        { 0.00,  0.00, 0.00, -0.02, -0.01, 1.0},
-        { 0.15, -0.20, 0.20, -0.04, -0.05, 2.0},
-    };
-
-    double tvec_error_max   = 0.0;
-    double rotation_error_max = 0.0;
-    double reprojection_max = 0.0;
-
-    for (const auto& pose : poses)
+    const std::optional<std::array<cv::Point2f, 4>> points = algorithm::vision::ProjectPose(*object_points, algorithm::vision::ArmorRotation(yaw_rad, 0.0), tvec, camera);
+    if (!points)
     {
-        const cv::Vec3d rvec_in(pose[0], pose[1], pose[2]);
-        const cv::Vec3d tvec_in(pose[3], pose[4], pose[5]);
+        return false;
+    }
 
-        std::vector<cv::Point2f> projected;
-        cv::projectPoints(object_list, rvec_in, tvec_in, camera_matrix, distort_coeffs, projected);
+    corners = *points;
+    return true;
+}
+
+} // namespace
+
+/**
+ * @brief 合成一串带已知半径的自转观测，喂给跟踪器，看半径能否收敛
+ *
+ * 纯离线：观测由 projectPoints 造出，没有相机、没有噪声。真实半径 0.20 m、角速度 2 rad/s、
+ * 30 fps，与规划 §2 算"17 帧"用的工况一致；半径初值故意给到 0.35 m（偏离 75%），
+ * 只有观测真的约束了半径才收得回来。
+ *
+ * @return true 半径收敛到真值 ±10% 且帧数不超过 17
+ */
+static bool CheckTracker()
+{
+    const algorithm::vision::CameraModel camera = MakeCamera();
+    const algorithm::vision::ArmorDimensions dimensions;
+
+    constexpr double kTrueRadius    = 0.20;         // 真实半径，单位 m
+    constexpr double kOmega         = 2.0;          // 角速度，单位 rad/s
+    constexpr double kDt            = 1.0 / 30.0;
+    constexpr double kTolerance     = 0.10;         // 收敛判据：±10%
+    constexpr int32_t kAcceptFrames = 17;           // 验收帧数上限（规划 §2 算的界）
+    constexpr int32_t kMaxFrames    = 60;           // 诊断窗口：先跑到 60 帧看是收敛慢还是卡住
+
+    algorithm::vision::ArmorTrackerConfig config;
+    config.radius_init_m = 0.35;                    // 故意给偏，验证观测能把它拉回来
+
+    // 合成观测由 projectPoints 直接造出，没有噪声；点噪声按"无噪声"给。
+    // 若沿用真实的 8 px，半径在 3 m 处的可观测性（约 0.6 px/m）会被噪声方差淹没、几乎收不动
+    config.point_sigma_px = 0.5;
+
+    // 自检的车心静止、转速恒定，是光滑运动；过程噪声给参考量级会让滤波器拿"中心平移"
+    // 去解释弧线运动，半径就修不动。这里按光滑运动给极小的加速度方差：车心确实不动，
+    // 就把它钉住，逼滤波器只能去修半径（真机需按实测重定）
+    config.accel_variance = 1.0e-4;
+    config.angular_accel_variance = 1.0e-2;
+
+    algorithm::vision::ArmorTracker tracker(config);
+
+    const Eigen::Vector3d center(0.05, 0.02, 3.0);
+
+    std::int32_t converged_frame = -1;
+    for (std::int32_t frame = 0; frame < kMaxFrames; ++frame)
+    {
+        const double yaw = kOmega * static_cast<double>(frame) * kDt;
 
         std::array<cv::Point2f, 4> corners {};
-        std::copy(projected.begin(), projected.end(), corners.begin());
-
-        const std::optional<algorithm::vision::ArmorPose> solved = algorithm::vision::SolvePose(corners, *object_points, camera);
-        if (!solved)
+        if (!MakeObservation(camera, dimensions, yaw, kTrueRadius, center, corners))
         {
-            DUST_LOG_ERR("pose selfcheck: SolvePose returned nothing");
+            DUST_LOG_ERR("tracker selfcheck: cannot build observation");
             return false;
         }
 
-        double tvec_error = 0.0;
-        for (std::size_t axis = 0; axis < 3; ++axis)
+        if (!tracker.Update(corners, algorithm::vision::ArmorSize::Small, dimensions, camera, kDt))
         {
-            tvec_error = std::max(tvec_error, std::abs(solved->tvec[axis] - tvec_in[axis]));
+            DUST_LOG_ERR("tracker selfcheck: update rejected at frame %d", frame);
+            return false;
         }
-        tvec_error_max = std::max(tvec_error_max, tvec_error);
 
-        // 旋转量比矩阵而不是比 rvec 分量：同一旋转的 Rodrigues 表示可以有多种写法
-        cv::Mat rotation_in;
-        cv::Mat rotation_solved;
-        cv::Rodrigues(rvec_in, rotation_in);
-        cv::Rodrigues(solved->rvec, rotation_solved);
-        rotation_error_max = std::max(rotation_error_max, cv::norm(rotation_in, rotation_solved, cv::NORM_INF));
+        const double radius = tracker.Radius();
+        const double relative_error = std::abs(radius - kTrueRadius) / kTrueRadius;
+        DUST_LOG_INF("tracker selfcheck frame=%d radius=%.4f m error=%.1f%% a=%.3f w=%.3f truth_a=%.3f", frame, radius, relative_error * 100.0, tracker.Angle(), tracker.Omega(), yaw);
 
-        reprojection_max = std::max(reprojection_max, solved->reprojection_error_px);
-
-        // 逐距离打一行：重投影随距离的变化就是本条的判据
-        DUST_LOG_INF("pose selfcheck d=%.2fm tvec=%.3e m reprojection=%.3e px", tvec_in[2], tvec_error, solved->reprojection_error_px);
+        if (relative_error <= kTolerance)
+        {
+            converged_frame = frame + 1;
+            break;
+        }
     }
 
-    // 合成观测没有噪声，但角点存在 float 里：像素坐标 ~700 px 时尾数量化台阶约 4e-5 px，
-    // 重投影的地板就是这个量级（实测 2.3e-5）。1e-3 m / 1e-6 / 1e-3 px 是拿来抓"物点顺序、
-    // 单位、Rodrigues"那类量级 1e-1 的错，不是精度指标
-    const bool passed = tvec_error_max < 1.0e-3 && rotation_error_max < 1.0e-6 && reprojection_max < 1.0e-3;
+    if (converged_frame < 0)
+    {
+        DUST_LOG_ERR("tracker selfcheck failed: radius did not converge within %d frames (final %.4f m, truth %.4f m)", kMaxFrames, tracker.Radius(), kTrueRadius);
+        return false;
+    }
 
-    DUST_LOG_INF("pose selfcheck %s: tvec=%.3e m rotation=%.3e reprojection=%.3e px", passed ? "ok" : "failed", tvec_error_max, rotation_error_max, reprojection_max);
-
-    return passed;
+    DUST_LOG_INF("tracker selfcheck: radius %.4f m within %.0f%% after %d frames (limit %d)", tracker.Radius(), kTolerance * 100.0, converged_frame, kAcceptFrames);
+    return converged_frame <= kAcceptFrames;
 }
 
 /**
@@ -130,7 +165,7 @@ static bool CheckPose()
  */
 bool thread_init()
 {
-    if (!CheckPose())
+    if (!CheckTracker())
     {
         return false;
     }

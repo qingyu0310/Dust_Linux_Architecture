@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <opencv2/calib3d.hpp>
 #include <vector>
 
@@ -82,7 +83,132 @@ double MeanReprojectionError(const std::array<cv::Point2f, 4>& measured, const s
     return total / static_cast<double>(measured.size());
 }
 
+/**
+ * @brief Rodrigues 旋转向量转 Eigen 3x3 矩阵
+ */
+Eigen::Matrix3d ToEigenRotation(const cv::Vec3d& rvec)
+{
+    cv::Matx33d rotation;
+    cv::Rodrigues(cv::Mat(rvec), rotation);
+
+    Eigen::Matrix3d result;
+    for (std::int32_t row = 0; row < 3; ++row)
+    {
+        for (std::int32_t col = 0; col < 3; ++col)
+        {
+            result(row, col) = rotation(row, col);
+        }
+    }
+    return result;
+}
+
+/**
+ * @brief Eigen 3x3 矩阵转 Rodrigues 旋转向量
+ */
+cv::Vec3d ToRotationVector(const Eigen::Matrix3d& rotation)
+{
+    cv::Matx33d matrix;
+    for (std::int32_t row = 0; row < 3; ++row)
+    {
+        for (std::int32_t col = 0; col < 3; ++col)
+        {
+            matrix(row, col) = rotation(row, col);
+        }
+    }
+
+    cv::Vec3d rvec;
+    cv::Rodrigues(cv::Mat(matrix), rvec);
+    return rvec;
+}
+
+/**
+ * @brief 外参旋转向量转 3x3 旋转矩阵
+ */
+Eigen::Matrix3d ExtrinsicRotation(const GimbalExtrinsics& extrinsics)
+{
+    return ToEigenRotation(extrinsics.rotation);
+}
+
 } // namespace
+
+/**
+ * @brief 相机系点 → 云台系点
+ */
+Eigen::Vector3d CameraToGimbal(const Eigen::Vector3d& point, const GimbalExtrinsics& extrinsics)
+{
+    const Eigen::Vector3d translation(extrinsics.translation[0], extrinsics.translation[1], extrinsics.translation[2]);
+    return ExtrinsicRotation(extrinsics) * point + translation;
+}
+
+/**
+ * @brief 相机系方向 → 云台系方向，只转不平移
+ */
+Eigen::Vector3d CameraToGimbalDirection(const Eigen::Vector3d& direction, const GimbalExtrinsics& extrinsics)
+{
+    return ExtrinsicRotation(extrinsics) * direction;
+}
+
+/**
+ * @brief 云台系点 → 相机系点
+ */
+Eigen::Vector3d GimbalToCamera(const Eigen::Vector3d& point, const GimbalExtrinsics& extrinsics)
+{
+    const Eigen::Vector3d translation(extrinsics.translation[0], extrinsics.translation[1], extrinsics.translation[2]);
+    return ExtrinsicRotation(extrinsics).transpose() * (point - translation);
+}
+
+/**
+ * @brief 云台系方向 → 相机系方向，只转不平移
+ */
+Eigen::Vector3d GimbalToCameraDirection(const Eigen::Vector3d& direction, const GimbalExtrinsics& extrinsics)
+{
+    return ExtrinsicRotation(extrinsics).transpose() * direction;
+}
+
+/**
+ * @brief 把一块装甲板的姿态从云台系表达换到相机系表达
+ */
+cv::Vec3d GimbalToCameraRotation(const cv::Vec3d& gimbal_rvec, const GimbalExtrinsics& extrinsics)
+{
+    const Eigen::Matrix3d camera_from_armor = ExtrinsicRotation(extrinsics).transpose() * ToEigenRotation(gimbal_rvec);
+    return ToRotationVector(camera_from_armor);
+}
+
+/**
+ * @brief 由板法向转角与板面倾角拼出板系到相机系的旋转向量
+ *
+ * 车的旋转是绕**竖直轴**，而相机系 y 向下，所以水平面是相机系的 x-z 平面，转角从 +x 向
+ * +z 量。三个列向量依次是板系 x（法向 n）、y（宽度 w）、z（灯条 l）：
+ * 法向在水平面内取 `n = (cos a, 0, sin a)`，面心为 `中心 − r·n`（与参考 `target.cpp` 的
+ * `center_x = xyz[0] + r·cos(a)` 一致）；灯条竖直取 `l = (0, −1, 0)`（相机 y 向下，“向上”
+ * 是 −y），宽度由右手系 `w = l × n = (−sin a, 0, cos a)` 定出。pitch 是板子绕**自身宽度轴**
+ * 的倾角，直接右乘在板系里。
+ *
+ * @param yaw_rad 板法向在水平面内的方位角，单位 rad
+ * @param pitch_rad 板面绕宽度轴的倾角，单位 rad
+ * @return 板系到相机系的 Rodrigues 旋转向量
+ */
+cv::Vec3d ArmorRotation(double yaw_rad, double pitch_rad)
+{
+    const double cos_yaw   = std::cos(yaw_rad);
+    const double sin_yaw   = std::sin(yaw_rad);
+    const double cos_pitch = std::cos(pitch_rad);
+    const double sin_pitch = std::sin(pitch_rad);
+
+    // 列向量 [法向 n, 宽度 w, 灯条 l]，w = l × n
+    const cv::Matx33d base( cos_yaw, -sin_yaw, 0.0,
+                            0.0,      0.0,    -1.0,
+                            sin_yaw,  cos_yaw, 0.0);
+
+    // 绕板系宽度轴（列 1）的倾角
+    const cv::Matx33d tilt(cos_pitch, 0.0, sin_pitch,
+                           0.0, 1.0, 0.0,
+                           -sin_pitch, 0.0, cos_pitch);
+
+    cv::Vec3d rvec;
+    cv::Rodrigues(cv::Mat(base * tilt), rvec);
+    return rvec;
+}
 
 /**
  * @brief 按装甲板尺寸生成板系物点，顺序固定 LT、RT、RB、LB

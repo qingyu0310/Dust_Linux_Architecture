@@ -13,6 +13,7 @@
 
 #include "framework/algorithm/vision/core/armor_types.hpp"
 
+#include <Eigen/Dense>
 #include <array>
 #include <opencv2/core.hpp>
 #include <optional>
@@ -61,6 +62,20 @@ struct CameraModel
 };
 
 /**
+ * @brief 相机相对云台的外参：把相机系的点与向量换到云台系
+ *
+ * `p_gimbal = R_camera2gimbal · p_camera + t_camera2gimbal`，与参考 `solver.cpp` 一致。
+ * 本工程还没有云台设备层、也没做手眼标定，所以默认是单位阵/零平移——此时"云台系"与
+ * "相机系"数值上完全相同，跟踪器照常工作。等有了云台、标定出这 12 个数，填进 YAML 即可
+ * 让跟踪器工作在云台系，不必改动算法。
+ */
+struct GimbalExtrinsics
+{
+    cv::Vec3d rotation {};    // R_camera2gimbal 的 Rodrigues 形式，单位阵时为 (0,0,0)
+    cv::Vec3d translation {}; // t_camera2gimbal，单位 m，须与点坐标单位一致
+};
+
+/**
  * @brief 单块装甲板的相机系位姿与反投校验
  */
 struct ArmorPose
@@ -70,6 +85,69 @@ struct ArmorPose
     double reprojection_error_px {0.0};      // 四点反投回像素的平均误差，单位 pixel
     std::array<cv::Point2f, 4> projected {}; // 反投的四点，顺序与输入 corner 相同
 };
+
+/**
+ * @brief 相机系点 → 云台系点
+ *
+ * @param point 相机系下的点，单位 m
+ * @param extrinsics 相机相对云台的外参
+ * @return 云台系下的点，单位 m
+ */
+Eigen::Vector3d CameraToGimbal(const Eigen::Vector3d& point, const GimbalExtrinsics& extrinsics);
+
+/**
+ * @brief 相机系方向 → 云台系方向，只转不平移
+ *
+ * @param direction 相机系下的方向向量
+ * @param extrinsics 相机相对云台的外参
+ * @return 云台系下的方向向量
+ */
+Eigen::Vector3d CameraToGimbalDirection(const Eigen::Vector3d& direction, const GimbalExtrinsics& extrinsics);
+
+/**
+ * @brief 云台系点 → 相机系点
+ *
+ * @param point 云台系下的点，单位 m
+ * @param extrinsics 相机相对云台的外参
+ * @return 相机系下的点，单位 m
+ */
+Eigen::Vector3d GimbalToCamera(const Eigen::Vector3d& point, const GimbalExtrinsics& extrinsics);
+
+/**
+ * @brief 云台系方向 → 相机系方向，只转不平移
+ *
+ * @param direction 云台系下的方向向量
+ * @param extrinsics 相机相对云台的外参
+ * @return 相机系下的方向向量
+ */
+Eigen::Vector3d GimbalToCameraDirection(const Eigen::Vector3d& direction, const GimbalExtrinsics& extrinsics);
+
+/**
+ * @brief 把一块装甲板的姿态从云台系表达换到相机系表达
+ *
+ * 板系到云台系的旋转 `R_ag` 换成板系到相机系的 `R_ac = R_cg⁻¹ · R_ag`，只用到外参的旋转
+ * 部分（平移对方向无影响）。跟踪器的状态在云台系，投影前要用它把姿态一并换过去。
+ *
+ * @param gimbal_rvec 板系到云台系的旋转向量
+ * @param extrinsics 相机相对云台的外参
+ * @return 板系到相机系的旋转向量
+ */
+cv::Vec3d GimbalToCameraRotation(const cv::Vec3d& gimbal_rvec, const GimbalExtrinsics& extrinsics);
+
+/**
+ * @brief 由板法向转角与板面倾角拼出板系到相机系的旋转向量
+ *
+ * 相机系 x 向右、y 向下、z 向前。板系 x 为法向、y 沿宽度、z 沿灯条方向（见文件头约定）。
+ * `yaw_rad` 是板法向在水平面（相机系 x-z 平面）内的方位角，从 +z 向 +x 量；`pitch_rad` 是
+ * 板面绕宽度轴的倾角，板子正立时为 0。
+ *
+ * 跨帧跟踪器用它把状态里的一个转角变成位姿，自检用它造观测，两边必须是同一份约定。
+ *
+ * @param yaw_rad 板法向在水平面内的方位角，单位 rad
+ * @param pitch_rad 板面绕宽度轴的倾角，单位 rad
+ * @return 板系到相机系的 Rodrigues 旋转向量
+ */
+cv::Vec3d ArmorRotation(double yaw_rad, double pitch_rad);
 
 /**
  * @brief 按装甲板尺寸生成板系物点，顺序固定 LT、RT、RB、LB

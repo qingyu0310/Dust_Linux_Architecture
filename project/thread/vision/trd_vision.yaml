@@ -38,12 +38,8 @@ distort_p2: 0.001394902737
 distort_k3: 0
 reprojection_error_px: 0.106212
 
-# ---- 装甲板位姿与整车参数：PnP 的物点尺寸与跟踪器初值 ----
-# 装甲板物理尺寸，单位 m。小装甲板 135 mm（面板宽，不含灯条）、灯条长 56 mm。
-# 写错会直接体现为距离成比例偏差。
-armor_small_width_m: 0.135
-armor_big_width_m: 0.230
-armor_lightbar_length_m: 0.056
+# ---- 装甲板位姿与整车参数 ----
+# 装甲板物理尺寸（135/230/56 mm）是实测确定值，写在 armor_pose.hpp 的常量里，不在这里重复。
 
 # 车体旋转半径初值，单位 m；只在跟踪器初始化时用，之后由观测修正。
 # 0.2 是参考对普通步兵车的取值（tracker.cpp:391）。调大：收敛前外推更散；调小：无明显代价。
@@ -51,3 +47,15 @@ armor_radius_init_m: 0.2
 
 # 整车装甲板数量。四面车为 4；收敛前不画另外三面。
 armor_num: 4
+
+# ---- 相机相对云台的外参：p_gimbal = R_camera2gimbal · p_camera + t_camera2gimbal ----
+# R_camera2gimbal 用 Rodrigues 三元素表示。本机还没有云台、也没做手眼标定，所以这里先填
+# 单位阵/零平移（0,0,0 即单位阵），此时跟踪器工作在相机系。等有云台并标定出外参后，
+# 把 12 个数填进来即可让跟踪器输出云台系结果，算法不用改。
+# R 填非单位阵会改变坐标含义：填错会让四面与画面里的板对不上。
+gimbal_rvec_x: 0.0
+gimbal_rvec_y: 0.0
+gimbal_rvec_z: 0.0
+gimbal_tx_m: 0.0
+gimbal_ty_m: 0.0
+gimbal_tz_m: 0.0

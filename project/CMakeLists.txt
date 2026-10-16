@@ -36,6 +36,7 @@ endif()
 
 if(CONFIG_DUST_VISION_YOLO OR CONFIG_DUST_VISION_POSE)
     target_link_libraries(vision_app PRIVATE framework_vision)
+    target_link_libraries(vision_app PRIVATE Eigen3::Eigen)
 endif()
 
 if(CONFIG_DUST_CALIB)

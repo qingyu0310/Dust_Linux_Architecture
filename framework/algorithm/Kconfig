@@ -51,3 +51,13 @@ config DUST_VISION_POSE
     help
       Single-armor camera-frame pose from the detected corners and the calibrated
       intrinsics: object points, IPPE solve and reprojection check (vision/pose).
+
+config DUST_VISION_TRACK
+    bool "armor cross-frame tracking"
+    default n
+    select DUST_VISION_POSE
+    select DUST_FLT_KALMAN_EKF
+    select DUST_MATH_ANGLE
+    help
+      Single-target cross-frame state estimation: rotation centre, angle, radius
+      and the four-armor derivation (vision/track).

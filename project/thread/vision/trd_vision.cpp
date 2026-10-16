@@ -152,7 +152,7 @@ struct ReportWindow
 
 static CameraIntrinsics camera_intrinsics_ {};                          // 本线程读入的内参，后续 PnP 使用
 
-static ArmorDimensions armor_dimensions_ {};                           // 装甲板实物尺寸，PnP 物点用
+static GimbalExtrinsics gimbal_extrinsics_ {};                         // 相机相对云台的外参，未标定时为单位阵
 
 static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
 
@@ -223,7 +223,7 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     cmd::config::Config yaml;
     yaml.Load("thread/vision/trd_vision.yaml",
               {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
-              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px", "armor_small_width_m", "armor_big_width_m", "armor_lightbar_length_m", "armor_radius_init_m", "armor_num"});
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px", "armor_radius_init_m", "armor_num", "gimbal_rvec_x", "gimbal_rvec_y", "gimbal_rvec_z", "gimbal_tx_m", "gimbal_ty_m", "gimbal_tz_m"});
 
     detector_config.engine_path = yaml.GetPath("engine_path");
     if (detector_config.engine_path.empty())
@@ -251,9 +251,12 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
 
     camera_intrinsics_.reprojection_error_px = yaml.GetDouble("reprojection_error_px", 0.0, 1000000.0);
 
-    armor_dimensions_.small_width_m     = yaml.GetDouble("armor_small_width_m",     0.001, 10.0);
-    armor_dimensions_.big_width_m       = yaml.GetDouble("armor_big_width_m",       0.001, 10.0);
-    armor_dimensions_.lightbar_length_m = yaml.GetDouble("armor_lightbar_length_m", 0.001, 10.0);
+    gimbal_extrinsics_.rotation[0]    = yaml.GetDouble("gimbal_rvec_x", -4.0, 4.0);
+    gimbal_extrinsics_.rotation[1]    = yaml.GetDouble("gimbal_rvec_y", -4.0, 4.0);
+    gimbal_extrinsics_.rotation[2]    = yaml.GetDouble("gimbal_rvec_z", -4.0, 4.0);
+    gimbal_extrinsics_.translation[0] = yaml.GetDouble("gimbal_tx_m", -10.0, 10.0);
+    gimbal_extrinsics_.translation[1] = yaml.GetDouble("gimbal_ty_m", -10.0, 10.0);
+    gimbal_extrinsics_.translation[2] = yaml.GetDouble("gimbal_tz_m", -10.0, 10.0);
 
     DUST_LOG_INF("vision: intrinsics %dx%d fx=%.3f fy=%.3f cx=%.3f cy=%.3f", camera_intrinsics_.image_width, camera_intrinsics_.image_height, camera_intrinsics_.fx, camera_intrinsics_.fy, camera_intrinsics_.cx, camera_intrinsics_.cy);
 }
@@ -334,6 +337,7 @@ static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>&
 {
     cv::Mat drawn = image.clone();
     const CameraModel camera = ToCameraModel(camera_intrinsics_);
+    const ArmorDimensions dimensions; // 实测确定值，常量在 armor_pose.hpp
 
     uint64_t solved  = 0;
     uint64_t invalid = 0;
@@ -342,7 +346,7 @@ static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>&
 
     for (const DetectedArmor& armor : armors)
     {
-        const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(armor.GetSize(), armor_dimensions_);
+        const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(armor.GetSize(), dimensions);
         const std::optional<ArmorPose> pose = object_points ? SolvePose(armor.GetCorners(), *object_points, camera) : std::nullopt;
         if (!pose)
         {

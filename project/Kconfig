@@ -67,10 +67,11 @@ config TRD_CALIB
 
 config TRD_VISION
     bool "Vision detection thread"
-    default y
+    default n
     depends on TRD_CAMERA && !TRD_CALIB
     select DUST_VISION_YOLO
     select DUST_VISION_POSE
+    select DUST_VISION_TRACK
     select DUST_TPC_CAMERA_TO
     select DUST_TPC_VISION_TO
     help
@@ -98,7 +99,7 @@ config TRD_DISPLAY
 
 config TRD_TEST
     bool "User test thread"
-    default n
-    select DUST_VISION_POSE
+    default y
+    select DUST_VISION_TRACK
     help
-      临时测试开关：当前跑单块装甲板位姿（PnP）的合成自检。
+      临时测试开关：当前跑跨帧跟踪器的合成自检。

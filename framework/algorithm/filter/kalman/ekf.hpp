@@ -75,9 +75,8 @@ public:
      * @note F 的要求同无输入版本：必须在当前 x_ 处取值
      */
     template <int ControlDim>
-    const State& predict(const ProcessModel& f, const StateMatrix& process_jacobian,
-                         const Eigen::Matrix<Scalar, StateDim, ControlDim>& b,
-                         const Eigen::Matrix<Scalar, ControlDim, 1>& u) {
+    const State& predict(const ProcessModel& f, const StateMatrix& process_jacobian, const Eigen::Matrix<Scalar, StateDim, ControlDim>& b, const Eigen::Matrix<Scalar, ControlDim, 1>& u) 
+    {
         x_ = f(x_) + b * u;
         p_ = process_jacobian * p_ * process_jacobian.transpose() + q_;
         return x_;
@@ -94,8 +93,8 @@ public:
      * @note h 与 H 是分开传的，一致性只能靠调用方保证：H 必须是在当前 x_ 处取的 ∂h/∂x，
      *       理由同 predict
      */
-    const State& correct(const Measurement& z, const MeasureModel& h,
-                         const ObserveJacobian& observe_jacobian) {
+    const State& correct(const Measurement& z, const MeasureModel& h, const ObserveJacobian& observe_jacobian) 
+    {
         const Measurement y = z - h(x_);
         const MeasureMatrix s = observe_jacobian * p_ * observe_jacobian.transpose() + r_;
         // K = P Hᵀ S⁻¹。S 对称，转置后等价于 (S⁻¹ H P)ᵀ，用 ldlt 分解求解代替求逆
