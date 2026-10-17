@@ -51,7 +51,9 @@ struct ArmorTrackerConfig
     double  accel_variance {10.0};              // 位置加速度方差，量级取自参考 v1
     double  angular_accel_variance {100.0};     // 角加速度方差，量级取自参考 v2
     double  shape_variance {0.1};               // r/l/h 的过程噪声，防止协方差崩塌
-    double  point_sigma_px {8.0};               // 四点观测噪声，单位 pixel
+    double  point_sigma_px {8.0};               // 四点观测噪声基准，单位 pixel（按本机实测重定）
+    double  sigma_distance_scale {0.0};         // 观测噪声随距离平方增长的系数，单位 1/m²；0 表示不缩放
+    double  nis_threshold {0.0};                // NIS 卡方阈值；0 表示不判（按本工程 8 维观测重定）
     int32_t converge_updates {4};               // 收敛所需的最少更新次数
     GimbalExtrinsics extrinsics {};             // 相机相对云台的外参；默认单位阵时工作系即相机系
 };
@@ -86,9 +88,10 @@ public:
      * @param dimensions 实物尺寸，单位 m
      * @param camera 内参与畸变
      * @param dt_s 距上一次更新的时间，单位 s；首次调用忽略
-     * @return true 状态可用；false 观测无效或修正后状态发散
+     * @param face 这一帧看到的是第几面；四面车的面 1、3 用第二半径与高度差
+     * @return true 状态可用；false 观测无效、面序越界或修正后状态发散
      */
-    bool Update(const std::array<cv::Point2f, 4>& corners, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, double dt_s);
+    bool Update(const std::array<cv::Point2f, 4>& corners, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, double dt_s, std::int32_t face);
 
     /**
      * @brief 只按 dt 推进状态，不修正
@@ -96,6 +99,20 @@ public:
      * 帧间没有匹配到观测时用，让状态和协方差随过程噪声自然扩散。
      */
     void Predict(double dt_s);
+
+    /**
+     * @brief 把状态按指定面投成像素四点，不修改状态
+     *
+     * 供上层做面序判定与配对代价：对每个面各投一次，与观测四点比重投影残差，取最小者。
+     * 与 `Update` 用的是同一套观测模型，所以"代价最小的面"就是"更新时该用的面"。
+     *
+     * @param size 装甲板大小
+     * @param dimensions 实物尺寸
+     * @param camera 内参与畸变
+     * @param face 面序，须在 [0, armor_num) 内
+     * @return 四点像素坐标；未初始化、面序越界或投影失败时返回 std::nullopt
+     */
+    std::optional<std::array<cv::Point2f, 4>> ProjectFace(ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, std::int32_t face) const;
 
     /**
      * @brief 四面的中心与转角，按面序返回
@@ -106,6 +123,11 @@ public:
      * @brief 是否已收敛：更新次数够且半径没跑出物理范围
      */
     bool Converged() const;
+
+    /**
+     * @brief 是否已经用一帧观测初始化过状态
+     */
+    bool Active() const;
 
     /**
      * @brief 半径或第二半径是否已跑出物理范围
@@ -131,6 +153,21 @@ public:
      * @brief 当前主半径估计，单位 m
      */
     double Radius() const;
+
+    /**
+     * @brief 当前第二半径差估计（面 1、3 相对面 0、2 的半径差），单位 m
+     */
+    double RadiusGap() const;
+
+    /**
+     * @brief 全部更新里 NIS 超阈值的比例
+     *
+     * 用来判"跟丢了 / 收敛到坏值"：残差持续偏大但半径还没跑出物理范围时，`Diverged()`
+     * 看不出来，这个数看得出来。
+     *
+     * @return [0, 1]；尚未更新时返回 0
+     */
+    double NisFailureRate() const;
 
 private:
     // 状态下标：顺序即状态向量的定义，改这里必须同步改过程和观测模型
@@ -163,8 +200,14 @@ private:
 
     /**
      * @brief 状态到像素四点的观测模型
+     *
+     * @param state 用于取值的那份状态，不一定是滤波器当前状态：数值雅可比要传入扰动状态
+     * @param size 装甲板大小
+     * @param dimensions 实物尺寸
+     * @param camera 内参与畸变
+     * @param face 这一帧看到的是第几面
      */
-    Measure Observe(const State& state, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera) const;
+    Measure Observe(const State& state, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, std::int32_t face) const;
 
     /**
      * @brief 由状态推出某个面的转角

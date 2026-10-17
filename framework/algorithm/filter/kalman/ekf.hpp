@@ -13,7 +13,9 @@
 
 #include <Eigen/Dense>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <utility>
 
 namespace algorithm::filter {
 
@@ -35,6 +37,23 @@ public:
     using KalmanGain        = Eigen::Matrix<Scalar, StateDim, MeasureDim>;              // 卡尔曼增益 K
     using ProcessModel      = std::function<State(const State&)>;                       // 过程模型 f(x)
     using MeasureModel      = std::function<Measurement(const State&)>;                 // 观测模型 h(x)
+    using AddFunc           = std::function<State(const State&, const State&)>;         // 状态加法，默认逐元素
+    using SubtractFunc      = std::function<Measurement(const Measurement&, const Measurement&)>; // 观测减法，默认逐元素
+
+    /**
+     * @brief 设置状态加法，默认逐元素相加
+     *
+     * 状态里含角度分量时把它换成"先相加、再把角度包回 (−π, π]"，挂在这个钩子里后，
+     * 预测与修正都不必再在调用侧手动归一化。
+     */
+    void set_add(AddFunc add) { add_ = std::move(add); }
+
+    /**
+     * @brief 设置观测减法，默认逐元素相减
+     *
+     * 观测里含角度分量时换成"取最短角差"，否则 ±π 附近的残差会被算成一个整圈。
+     */
+    void set_subtract(SubtractFunc subtract) { subtract_ = std::move(subtract); }
 
     void set_state(const State& x, const StateMatrix& p) {
         x_ = x;
@@ -93,13 +112,23 @@ public:
      * @note h 与 H 是分开传的，一致性只能靠调用方保证：H 必须是在当前 x_ 处取的 ∂h/∂x，
      *       理由同 predict
      */
-    const State& correct(const Measurement& z, const MeasureModel& h, const ObserveJacobian& observe_jacobian) 
+    const State& correct(const Measurement& z, const MeasureModel& h, const ObserveJacobian& observe_jacobian)
     {
-        const Measurement y = z - h(x_);
+        const Measurement y = subtract_(z, h(x_));
         const MeasureMatrix s = observe_jacobian * p_ * observe_jacobian.transpose() + r_;
         // K = P Hᵀ S⁻¹。S 对称，转置后等价于 (S⁻¹ H P)ᵀ，用 ldlt 分解求解代替求逆
         const KalmanGain k = s.ldlt().solve(observe_jacobian * p_).transpose();
-        x_ = x_ + k * y;
+        x_ = add_(x_, k * y);
+
+        // NIS：归一化新息平方 yᵀ S⁻¹ y。残差本身不参与递推，但它是"这帧观测像不像本状态"
+        // 的唯一量化指标——滑窗统计超阈值比例，就能区分"跟丢/收敛到坏值"与正常跟踪
+        last_nis_ = y.transpose() * s.ldlt().solve(y);
+        ++update_count_;
+        if (last_nis_ > nis_threshold_)
+        {
+            ++nis_failures_;
+        }
+
         // Joseph 形式：比 (I - K H) P 多一层 (I - K H)ᵀ 和 K R Kᵀ，长时间递推能保住 P 的对称性与正定性
         const StateMatrix i_kh = StateMatrix::Identity() - k * observe_jacobian;
         p_ = i_kh * p_ * i_kh.transpose() + k * r_ * k.transpose();
@@ -109,11 +138,53 @@ public:
     const State& state() const { return x_; }
     const StateMatrix& covariance() const { return p_; }
 
+    /**
+     * @brief 最近一次修正的归一化新息平方
+     */
+    Scalar last_nis() const { return last_nis_; }
+
+    /**
+     * @brief 全部更新里 NIS 超阈值的比例
+     *
+     * @return [0, 1]；更新次数为 0 时返回 0
+     */
+    Scalar nis_failure_rate() const
+    {
+        return update_count_ == 0 ? Scalar(0) : static_cast<Scalar>(nis_failures_) / static_cast<Scalar>(update_count_);
+    }
+
+    /**
+     * @brief 设置 NIS 的卡方阈值
+     *
+     * 阈值取决于观测维数与置信水平，**必须按本工程的观测重定**：参考项目用 4 维
+     * `[yaw, pitch, distance, angle]` 观测、阈值 0.711，本工程的观测是 8 维像素，
+     * 自由度和量纲都不同。
+     */
+    void set_nis_threshold(Scalar threshold) { nis_threshold_ = threshold; }
+
+    /**
+     * @brief 清空 NIS 统计
+     */
+    void reset_nis()
+    {
+        last_nis_ = Scalar(0);
+        update_count_ = 0;
+        nis_failures_ = 0;
+    }
+
 private:
     State           x_{State::Zero()};                          // 状态估计
     StateMatrix     p_{StateMatrix::Identity()};                // 状态估计协方差
     StateMatrix     q_{StateMatrix::Identity()};                // 过程噪声协方差
     MeasureMatrix   r_{MeasureMatrix::Identity()};              // 观测噪声协方差
+
+    AddFunc         add_ = [](const State& a, const State& b) { return State(a + b); };            // 状态加法，默认逐元素
+    SubtractFunc    subtract_ = [](const Measurement& a, const Measurement& b) { return Measurement(a - b); }; // 观测减法，默认逐元素
+
+    Scalar          last_nis_ {0};                              // 最近一次修正的 NIS
+    Scalar          nis_threshold_ {0};                         // NIS 卡方阈值；0 表示未设，永不判失败
+    std::uint64_t   update_count_ {0};                          // 修正次数
+    std::uint64_t   nis_failures_ {0};                          // NIS 超阈值的次数
 };
 
 } // namespace algorithm::filter

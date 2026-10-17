@@ -75,6 +75,7 @@ struct Params
 static Params params_ {};
 
 static topic::camera_to::Subscriber sub_camera_to {topic::camera_to::pub_camera_to_};  // 本线程独占的相机帧游标
+
 static init::Thread thread_ {};                                     // 标定工作线程
 
 static std::vector<std::vector<cv::Point2f>> samples_;              // 已保留样本的圆心

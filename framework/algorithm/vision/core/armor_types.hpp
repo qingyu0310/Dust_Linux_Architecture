@@ -51,7 +51,8 @@ enum class ArmorLabel : std::uint8_t
     Sentry,
     Outpost,
     Base,
-    NotArmor
+    Any,                                    // 任意编号：只用于跟踪槽配置，不表示检测结果
+    NotArmor                                // 检测无效
 };
 
 } // namespace algorithm::vision

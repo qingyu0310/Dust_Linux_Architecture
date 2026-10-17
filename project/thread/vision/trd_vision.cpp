@@ -11,6 +11,7 @@
 
 #include "framework/algorithm/vision/detect/armor_detector.hpp"
 #include "framework/algorithm/vision/pose/armor_pose.hpp"
+#include "framework/algorithm/vision/track/multi_target.hpp"
 #include "framework/cmd/config/config.hpp"
 #include "framework/cmd/shell/log.hpp"
 #include "framework/init/Init_entry.hpp"
@@ -154,6 +155,12 @@ static CameraIntrinsics camera_intrinsics_ {};                          // 本�
 
 static GimbalExtrinsics gimbal_extrinsics_ {};                         // 相机相对云台的外参，未标定时为单位阵
 
+static MultiTargetConfig multi_target_config_ {};                      // 多目标跟踪参数，由 YAML 读入
+
+static std::unique_ptr<MultiTargetTracker> tracker_;                   // 多目标跟踪，槽位由 kTargetLabels 决定
+
+static std::optional<std::chrono::steady_clock::time_point> last_frame_time_; // 上一帧时间戳，用于跟踪的 dt
+
 static std::unique_ptr<ArmorDetector> detector_;                        // 本线程独占的 TensorRT 检测器
 
 #ifdef CONFIG_DUST_VISION_YOLO_REFINER
@@ -207,6 +214,8 @@ static const char* LabelName(ArmorLabel label)
             return "outpost";
         case ArmorLabel::Base:
             return "base";
+        case ArmorLabel::Any:
+            return "any";
         default:
             return "not_armor";
     }
@@ -223,7 +232,7 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     cmd::config::Config yaml;
     yaml.Load("thread/vision/trd_vision.yaml",
               {"engine_path",          "cuda_device",         "score_threshold", "confidence_threshold", "nms_threshold"},
-              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px", "armor_radius_init_m", "armor_num", "gimbal_rvec_x", "gimbal_rvec_y", "gimbal_rvec_z", "gimbal_tx_m", "gimbal_ty_m", "gimbal_tz_m"});
+              {"brightness_threshold", "min_light_length_px", "min_light_ratio", "max_light_ratio",      "max_light_tilt_deg", "max_endpoint_distance_px", "image_width", "image_height", "camera_fx", "camera_fy", "camera_cx", "camera_cy", "distort_k1", "distort_k2", "distort_p1", "distort_p2", "distort_k3", "reprojection_error_px", "armor_radius_init_m", "armor_num", "point_sigma_px", "sigma_distance_scale", "accel_variance", "angular_accel_variance", "shape_variance", "gimbal_rvec_x", "gimbal_rvec_y", "gimbal_rvec_z", "gimbal_tx_m", "gimbal_ty_m", "gimbal_tz_m"});
 
     detector_config.engine_path = yaml.GetPath("engine_path");
     if (detector_config.engine_path.empty())
@@ -257,6 +266,16 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     gimbal_extrinsics_.translation[0] = yaml.GetDouble("gimbal_tx_m", -10.0, 10.0);
     gimbal_extrinsics_.translation[1] = yaml.GetDouble("gimbal_ty_m", -10.0, 10.0);
     gimbal_extrinsics_.translation[2] = yaml.GetDouble("gimbal_tz_m", -10.0, 10.0);
+
+    // 跟踪器参数：Q/R 的量级都在这里调，不改代码
+    multi_target_config_.tracker.armor_num              = yaml.GetInt("armor_num", 1, 8);
+    multi_target_config_.tracker.radius_init_m          = yaml.GetDouble("armor_radius_init_m", 0.05, 0.5);
+    multi_target_config_.tracker.point_sigma_px         = yaml.GetDouble("point_sigma_px", 0.1, 100.0);
+    multi_target_config_.tracker.sigma_distance_scale   = yaml.GetDouble("sigma_distance_scale", 0.0, 10.0);
+    multi_target_config_.tracker.accel_variance         = yaml.GetDouble("accel_variance", 1.0e-6, 1.0e6);
+    multi_target_config_.tracker.angular_accel_variance = yaml.GetDouble("angular_accel_variance", 1.0e-6, 1.0e6);
+    multi_target_config_.tracker.shape_variance         = yaml.GetDouble("shape_variance", 1.0e-6, 1.0e6);
+    multi_target_config_.tracker.extrinsics             = gimbal_extrinsics_;
 
     DUST_LOG_INF("vision: intrinsics %dx%d fx=%.3f fy=%.3f cx=%.3f cy=%.3f", camera_intrinsics_.image_width, camera_intrinsics_.image_height, camera_intrinsics_.fx, camera_intrinsics_.fy, camera_intrinsics_.cx, camera_intrinsics_.cy);
 }
@@ -323,15 +342,59 @@ static CameraModel ToCameraModel(const CameraIntrinsics& intrinsics)
 }
 
 /**
- * @brief 对每块检测到的装甲板解位姿，把解出的四点轮廓描在副本上
+ * @brief 把一个已收敛目标推出来的四面轮廓描在图上
  *
- * 画的是原图副本——通道里的像素与显示侧共享，改图的一方自己复制。此时画的是真的测到的
- * 那一块，不是外推的另外三面（那要等跨帧跟踪收敛）。
+ * 画的是状态推出来的四面，不是实测四点：每面按 `Armors()` 给出的中心与转角反投。尚未收敛的
+ * 目标不调用本函数——外推误差可达画面宽的 1/3（规划 §2）。
+ *
+ * @param drawn 输出图像，原地绘制
+ * @param faces 该目标四面的中心与转角
+ * @param dimensions 板尺寸
+ * @param camera 内参与畸变
+ * @param extrinsics 相机相对云台的外参
+ * @param color 该目标的绘制颜色
+ */
+static void DrawFaces(cv::Mat& drawn, const std::vector<ArmorState>& faces, const ArmorDimensions& dimensions,
+                      const CameraModel& camera, const GimbalExtrinsics& extrinsics, const cv::Scalar& color)
+{
+    const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(ArmorSize::Small, dimensions);
+    if (!object_points)
+    {
+        return;
+    }
+
+    for (const ArmorState& face : faces)
+    {
+        // 状态在云台系：换到相机系再投影
+        const Eigen::Vector3d center = GimbalToCamera(face.xyz, extrinsics);
+        const cv::Vec3d rvec = GimbalToCameraRotation(ArmorRotation(face.yaw_rad, 0.0), extrinsics);
+
+        const std::optional<std::array<cv::Point2f, 4>> points = ProjectPose(*object_points, rvec, cv::Vec3d(center.x(), center.y(), center.z()), camera);
+        if (!points)
+        {
+            continue;
+        }
+
+        std::vector<cv::Point> contour;
+        contour.reserve(points->size());
+        for (const cv::Point2f& point : *points)
+        {
+            contour.emplace_back(cv::Point(static_cast<int32_t>(std::lround(point.x)), static_cast<int32_t>(std::lround(point.y))));
+        }
+        cv::polylines(drawn, contour, true, color, 2, cv::LINE_AA);
+    }
+}
+
+/**
+ * @brief 推进多目标跟踪并把结果描在副本上
+ *
+ * 未收敛的目标只描本帧实测到的那块（解 PnP 后的四点），收敛后描状态推出来的四面。
+ * 画的是原图副本——通道里的像素与显示侧共享，改图的一方自己复制。
  *
  * @param image 相机帧，整幅 BGR
  * @param armors 本帧检测结果
  * @param report 本帧位姿统计，解出与未解出的块数都累加进去
- * @return 叠加好位姿轮廓的图像
+ * @return 叠加好轮廓的图像
  */
 static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>& armors, ReportWindow& report)
 {
@@ -339,11 +402,22 @@ static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>&
     const CameraModel camera = ToCameraModel(camera_intrinsics_);
     const ArmorDimensions dimensions; // 实测确定值，常量在 armor_pose.hpp
 
+    // 跟踪的 dt：用相机帧时间戳，缺首帧时给一帧的标称间隔
+    const auto now = std::chrono::steady_clock::now();
+    const double dt_s = last_frame_time_ ? std::chrono::duration<double>(now - *last_frame_time_).count() : (1.0 / 30.0);
+    last_frame_time_ = now;
+
+    if (tracker_)
+    {
+        tracker_->Update(armors, dimensions, camera, dt_s);
+    }
+
     uint64_t solved  = 0;
     uint64_t invalid = 0;
     double reprojection_sum = 0.0;
     double distance_sum     = 0.0;
 
+    // 先描未收敛目标"实测到的那块"：它是本帧真实观测，收敛前的唯一依据
     for (const DetectedArmor& armor : armors)
     {
         const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(armor.GetSize(), dimensions);
@@ -358,7 +432,6 @@ static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>&
         reprojection_sum += pose->reprojection_error_px;
         distance_sum     += cv::norm(pose->tvec);
 
-        // 描解出的四点轮廓：与实测四点是否贴合，肉眼一看就知道位姿对不对
         std::vector<cv::Point> contour;
         contour.reserve(pose->projected.size());
         for (const cv::Point2f& point : pose->projected)
@@ -367,12 +440,29 @@ static cv::Mat DrawPoses(const cv::Mat& image, const std::vector<DetectedArmor>&
         }
         cv::polylines(drawn, contour, true, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
 
-        // 置信度文字跟在轮廓左上角，颜色跟着队伍颜色，方便一眼分辨红蓝
         const cv::Scalar color = armor.GetColor() == TeamColor::Red ? cv::Scalar(0, 0, 255) : cv::Scalar(255, 0, 0);
         char text[64];
         std::snprintf(text, sizeof(text), "%s/%s %.2f", ColorName(armor.GetColor()), LabelName(armor.GetLabel()), armor.GetConfidence());
         const cv::Point text_position(static_cast<int32_t>(contour[0].x), static_cast<int32_t>(std::max(18.0f, contour[0].y - 6.0f)));
         cv::putText(drawn, text, text_position, cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv::LINE_AA);
+    }
+
+    // 再描已收敛目标的四面：每槽一套颜色，便于分辨不同目标
+    static const cv::Scalar kTargetColors[] = {
+        cv::Scalar(0, 255, 255), cv::Scalar(255, 0, 255), cv::Scalar(255, 255, 0),
+    };
+
+    if (tracker_)
+    {
+        for (std::int32_t slot = 0; slot < kMaxTargets; ++slot)
+        {
+            if (!tracker_->Converged(slot))
+            {
+                continue;
+            }
+            const cv::Scalar& color = kTargetColors[static_cast<std::size_t>(slot) % (sizeof(kTargetColors) / sizeof(kTargetColors[0]))];
+            DrawFaces(drawn, tracker_->Armors(slot), dimensions, camera, gimbal_extrinsics_, color);
+        }
     }
 
     report.AddPose(solved, invalid, reprojection_sum, distance_sum);
@@ -401,6 +491,19 @@ static void LogReport(const ReportWindow& report, double elapsed)
 
     // 位姿单独一行：err 是重投影、dist 是板心距离，做距离核对时只盯这一行
     DUST_LOG_DBG("vision", "pnp ok=%llu invalid=%llu err=%.3fpx dist=%.3fm", static_cast<unsigned long long>(report.pnp_ok), static_cast<unsigned long long>(report.pnp_invalid), report.pnp_reprojection_px / pnp_denominator, report.pnp_distance_m / pnp_denominator);
+
+    // 跟踪单独一行：每个槽一行，看收敛状态与半径
+    if (tracker_)
+    {
+        const std::array<TargetReport, kMaxTargets> reports = tracker_->Reports();
+        for (std::int32_t slot = 0; slot < kMaxTargets; ++slot)
+        {
+            const TargetReport& target = reports[static_cast<std::size_t>(slot)];
+            DUST_LOG_DBG("vision", "track slot=%d label=%s active=%d converged=%d updates=%d losses=%d dup=%d gate=%d r=%.3fm",
+                         slot, LabelName(target.label), target.active ? 1 : 0, target.converged ? 1 : 0,
+                         target.updates, target.losses, target.duplicates, target.gate_rejects, tracker_->Radius(slot));
+        }
+    }
 }
 
 /**
@@ -495,6 +598,9 @@ bool thread_init()
     const char* const refiner_state = "off";
 #endif
 
+    // 多目标跟踪：槽位与编号的绑定在 multi_target.hpp 的 kTargetLabels，参数已由 YAML 读入
+    tracker_ = std::make_unique<MultiTargetTracker>(multi_target_config_);
+
     DUST_LOG_INF("[vision] TensorRT device=%d engine=%s score=%.3f confidence=%.3f nms=%.3f refiner=%s input=%s/%s [1,3,%d,%d] output=%s FP32 [1,%d,%d]", detector_config.cuda_device, detector_config.engine_path.c_str(), detector_config.score_threshold, detector_config.confidence_threshold, detector_config.nms_threshold, refiner_state, detector_->GetInputName().c_str(), detector_->GetInputTypeName().c_str(), detector_->GetInputHeight(), detector_->GetInputWidth(), detector_->GetOutputName().c_str(), detector_->GetOutputRows(), detector_->GetOutputColumns());
     return true;
 }
@@ -539,6 +645,8 @@ void Release()
     refiner_.reset();
 }
 #endif
+    tracker_.reset();
+    last_frame_time_.reset();
     detector_.reset();
     topic::vision_to::pub_vision_to_.Clear();
 }

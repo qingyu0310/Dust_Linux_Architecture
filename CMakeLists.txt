@@ -60,7 +60,7 @@ find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc)
 
-if(CONFIG_DUST_VISION_YOLO)
+if(CONFIG_DUST_VISION_DETECT)
     find_package(OpenCV REQUIRED COMPONENTS dnn)
 endif()
 
@@ -70,11 +70,11 @@ endif()
 
 # ============================================================================
 #
-# 视觉依赖（CONFIG_DUST_VISION_YOLO）：CUDA / TensorRT
+# 视觉依赖（CONFIG_DUST_VISION_DETECT）：CUDA / TensorRT
 #
 # ============================================================================
 
-if(CONFIG_DUST_VISION_YOLO)
+if(CONFIG_DUST_VISION_DETECT)
     set(DUST_DEPENDENCY_ROOT "${PROJECT_SOURCE_DIR}/.venv" CACHE PATH
         "Root of the project-local CUDA and TensorRT environment")
     if(NOT DEFINED CUDAToolkit_ROOT)
@@ -119,7 +119,7 @@ if(CONFIG_DUST_VISION_YOLO)
     message(STATUS
         "TensorRT: ${TensorRT_VERSION_MAJOR}.${TensorRT_VERSION_MINOR}.${TensorRT_VERSION_PATCH}; include=${TensorRT_INCLUDE_DIR}; library=${TensorRT_LIBRARY}")
 else()
-    message(STATUS "CONFIG_DUST_VISION_YOLO=OFF: CUDA/TensorRT discovery is disabled")
+    message(STATUS "CONFIG_DUST_VISION_DETECT=OFF: CUDA/TensorRT discovery is disabled")
 endif()
 
 # ============================================================================

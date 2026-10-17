@@ -195,15 +195,16 @@ cv::Vec3d ArmorRotation(double yaw_rad, double pitch_rad)
     const double cos_pitch = std::cos(pitch_rad);
     const double sin_pitch = std::sin(pitch_rad);
 
-    // 列向量 [法向 n, 宽度 w, 灯条 l]，w = l × n
+    // 列向量 [法向 n, 宽度 w, 灯条 l]，三者构成右手系（行列式 +1）。
+    // 相机系 y 向下，所以灯条"向上"是 −y；宽度取 w = l × n。
     const cv::Matx33d base( cos_yaw, -sin_yaw, 0.0,
                             0.0,      0.0,    -1.0,
                             sin_yaw,  cos_yaw, 0.0);
 
     // 绕板系宽度轴（列 1）的倾角
-    const cv::Matx33d tilt(cos_pitch, 0.0, sin_pitch,
-                           0.0, 1.0, 0.0,
-                           -sin_pitch, 0.0, cos_pitch);
+    const cv::Matx33d tilt(cos_pitch,   0.0,    sin_pitch,
+                           0.0,         1.0,    0.0,
+                           -sin_pitch,  0.0,    cos_pitch);
 
     cv::Vec3d rvec;
     cv::Rodrigues(cv::Mat(base * tilt), rvec);

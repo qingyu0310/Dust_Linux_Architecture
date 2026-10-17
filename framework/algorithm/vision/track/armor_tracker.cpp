@@ -43,6 +43,17 @@ ArmorTracker::ArmorTracker(const ArmorTrackerConfig& config) : config_(config)
 {
     State state = State::Zero();
     state[kRadius] = config_.radius_init_m;
+
+    // 角度分量在每步加法后包回 (−π, π]：状态里有转角，平移与修正都可能让它越过 ±π。
+    // 这个钩子挂在滤波器内部后，预测与修正两条路径都不会漏掉归一化。
+    filter_.set_add([](const State& first, const State& second)
+    {
+        State sum = first + second;
+        sum[kAngle] = algorithm::math::normalize_radian_pm_pi(sum[kAngle]);
+        return sum;
+    });
+
+    filter_.set_nis_threshold(config_.nis_threshold);
     filter_.set_state(state, StateMat::Identity());
 }
 
@@ -69,9 +80,7 @@ Eigen::Vector3d ArmorTracker::ArmorCenter(const State& state, std::int32_t face)
 
     const double radius = use_second ? state[kRadius] + state[kRadiusGap] : state[kRadius];
 
-    return Eigen::Vector3d(state[kCenterX] - radius * std::cos(angle),
-                           state[kCenterY] + (use_second ? state[kHeightGap] : 0.0),
-                           state[kCenterZ] - radius * std::sin(angle));
+    return Eigen::Vector3d(state[kCenterX] - radius * std::cos(angle), state[kCenterY] + (use_second ? state[kHeightGap] : 0.0), state[kCenterZ] - radius * std::sin(angle));
 }
 
 /**
@@ -81,10 +90,10 @@ Eigen::Vector3d ArmorTracker::ArmorCenter(const State& state, std::int32_t face)
  * 二者是常量参数，不参与状态，也不进雅可比。状态在云台系，投影要先把面心换到相机系；
  * 外参默认单位阵时这一步是恒等。
  *
- * @note 观测固定对上当前面（面 0）：本工程只跟踪一辆车且不做多面关联，状态里的转角就是
- *       当前可见那一面的转角。
+ * `face` 决定的是"这一帧看到的是车上哪一面"：四面车的面 1、3 用第二半径与高度差，
+ * 所以同一个状态按不同的面投出来的四点不同——上层正是靠这一点分辨面序。
  */
-ArmorTracker::Measure ArmorTracker::Observe(const State& state, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera) const
+ArmorTracker::Measure ArmorTracker::Observe(const State& state, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, std::int32_t face) const
 {
     Measure projected;
     projected.setConstant(std::numeric_limits<double>::quiet_NaN());
@@ -95,18 +104,16 @@ ArmorTracker::Measure ArmorTracker::Observe(const State& state, ArmorSize size, 
         return projected;
     }
 
-    constexpr std::int32_t kObservedFace = 0;
-    const double angle = FaceAngle(state, kObservedFace);
+    const double angle = FaceAngle(state, face);
     // 状态在云台系：位置与姿态都换到相机系后再投影
-    const Eigen::Vector3d center = GimbalToCamera(ArmorCenter(state, kObservedFace), config_.extrinsics);
+    const Eigen::Vector3d center = GimbalToCamera(ArmorCenter(state, face), config_.extrinsics);
     const cv::Vec3d gimbal_rvec = ArmorRotation(angle, config_.armor_pitch_rad);
 
     const cv::Vec3d tvec(center.x(), center.y(), center.z());
     const cv::Vec3d rvec = GimbalToCameraRotation(gimbal_rvec, config_.extrinsics);
 
     const std::optional<std::array<cv::Point2f, 4>> points = ProjectPose(*object_points, rvec, tvec, camera);
-    if (!points)
-    {
+    if (!points) {
         return projected;
     }
 
@@ -116,6 +123,30 @@ ArmorTracker::Measure ArmorTracker::Observe(const State& state, ArmorSize size, 
         projected[static_cast<Eigen::Index>(2 * index + 1)] = (*points)[index].y;
     }
     return projected;
+}
+
+/**
+ * @brief 把状态按指定面投成像素四点，不修改状态
+ */
+std::optional<std::array<cv::Point2f, 4>> ArmorTracker::ProjectFace(ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, std::int32_t face) const
+{
+    if (!initialized_ || face < 0 || face >= config_.armor_num)
+    {
+        return std::nullopt;
+    }
+
+    const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(size, dimensions);
+    if (!object_points)
+    {
+        return std::nullopt;
+    }
+
+    const State& state = filter_.state();
+    const double angle = FaceAngle(state, face);
+    const Eigen::Vector3d center = GimbalToCamera(ArmorCenter(state, face), config_.extrinsics);
+    const cv::Vec3d rvec = GimbalToCameraRotation(ArmorRotation(angle, config_.armor_pitch_rad), config_.extrinsics);
+
+    return ProjectPose(*object_points, rvec, cv::Vec3d(center.x(), center.y(), center.z()), camera);
 }
 
 /**
@@ -242,27 +273,27 @@ void ArmorTracker::Predict(double dt_s)
     // Q 必须在 predict 之前写入：predict 内部会读 q_
     filter_.set_process_noise(noise);
 
+    // 角度归一化由滤波器的加法钩子负责，这里不再手动包回 ±π
     (void)filter_.predict([dt](const State& x)
     {
         State next = x;
         next[kCenterX] += x[kVelocityX] * dt;
         next[kCenterY] += x[kVelocityY] * dt;
         next[kCenterZ] += x[kVelocityZ] * dt;
-
         next[kAngle]   += x[kOmega]     * dt;
         return next;
     }, transition);
-
-    State state = filter_.state();
-    state[kAngle] = algorithm::math::normalize_radian_pm_pi(state[kAngle]);
-    filter_.set_state(state, filter_.covariance());
 }
 
 /**
  * @brief 用一帧的四点观测推进并修正状态
  */
-bool ArmorTracker::Update(const std::array<cv::Point2f, 4>& corners, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, double dt_s)
+bool ArmorTracker::Update(const std::array<cv::Point2f, 4>& corners, ArmorSize size, const ArmorDimensions& dimensions, const CameraModel& camera, double dt_s, std::int32_t face)
 {
+    if (face < 0 || face >= config_.armor_num) {
+        return false;
+    }
+
     const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(size, dimensions);
     if (!object_points) {
         return false;
@@ -315,8 +346,8 @@ bool ArmorTracker::Update(const std::array<cv::Point2f, 4>& corners, ArmorSize s
             minus[index] = algorithm::math::normalize_radian_pm_pi(minus[index]);
         }
 
-        const Measure forward  = Observe(plus,  size, dimensions, camera);
-        const Measure backward = Observe(minus, size, dimensions, camera);
+        const Measure forward  = Observe(plus,  size, dimensions, camera, face);
+        const Measure backward = Observe(minus, size, dimensions, camera, face);
         if (!forward.allFinite() || !backward.allFinite())
         {
             return false;
@@ -324,13 +355,20 @@ bool ArmorTracker::Update(const std::array<cv::Point2f, 4>& corners, ArmorSize s
         jacobian.col(index) = (forward - backward) / (2.0 * step);
     }
 
+    // 观测噪声随距离放大：同样的像素噪声，目标越远对应的三维误差越大（σ_d ∝ d²）。
+    // 参考 `target.cpp` 的 R 里也用 log 项随距离调权重；这里取更直接的平方缩放，
+    // 系数为 0 时退化成常数噪声。
+    const double face_distance = ArmorCenter(filter_.state(), face).norm();
+    const double distance_factor = 1.0 + config_.sigma_distance_scale * face_distance * face_distance;
+    const double sigma_px = config_.point_sigma_px * distance_factor;
+
     Filter::MeasureMatrix measurement_noise = Filter::MeasureMatrix::Zero();
-    measurement_noise.diagonal().setConstant(config_.point_sigma_px * config_.point_sigma_px);
+    measurement_noise.diagonal().setConstant(sigma_px * sigma_px);
     filter_.set_measurement_noise(measurement_noise);
 
-    (void)filter_.correct(measured, [this, size, &dimensions, &camera](const State& state)
+    (void)filter_.correct(measured, [this, size, &dimensions, &camera, face](const State& state)
     {
-        return Observe(state, size, dimensions, camera);
+        return Observe(state, size, dimensions, camera, face);
     }, jacobian);
 
     ApplyLimits();
@@ -362,6 +400,14 @@ std::vector<ArmorState> ArmorTracker::Armors() const
         armors.push_back(armor);
     }
     return armors;
+}
+
+/**
+ * @brief 是否已经用一帧观测初始化过状态
+ */
+bool ArmorTracker::Active() const
+{
+    return initialized_;
 }
 
 /**
@@ -398,6 +444,22 @@ std::int32_t ArmorTracker::UpdateCount() const
 double ArmorTracker::Radius() const
 {
     return filter_.state()[kRadius];
+}
+
+/**
+ * @brief 当前第二半径差估计
+ */
+double ArmorTracker::RadiusGap() const
+{
+    return filter_.state()[kRadiusGap];
+}
+
+/**
+ * @brief 全部更新里 NIS 超阈值的比例
+ */
+double ArmorTracker::NisFailureRate() const
+{
+    return filter_.nis_failure_rate();
 }
 
 /**

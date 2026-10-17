@@ -34,7 +34,7 @@ if(CONFIG_DUST_MOD_DEV_HIKROBOT)
     target_link_libraries(vision_app PRIVATE framework_modules)
 endif()
 
-if(CONFIG_DUST_VISION_YOLO OR CONFIG_DUST_VISION_POSE)
+if(CONFIG_DUST_VISION_CORE OR CONFIG_DUST_VISION_POSE)
     target_link_libraries(vision_app PRIVATE framework_vision)
     target_link_libraries(vision_app PRIVATE Eigen3::Eigen)
 endif()
@@ -52,7 +52,7 @@ endif()
 get_filename_component(_hikrobot_runtime_dir "${HIKROBOT_LIBRARY}" DIRECTORY)
 set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH "${_hikrobot_runtime_dir}")
 
-if(CONFIG_DUST_VISION_YOLO)
+if(CONFIG_DUST_VISION_DETECT)
     get_filename_component(_tensorrt_runtime_dir "${TensorRT_LIBRARY}" DIRECTORY)
     set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH
         "${_tensorrt_runtime_dir}" "${CUDAToolkit_LIBRARY_DIR}")
