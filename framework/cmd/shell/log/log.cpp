@@ -79,26 +79,10 @@ void Log::DeselectDebugEntry()
 }
 
 /**
- * @brief 设置 DBG 条目的输出模式
- *
- * 只修改已注册条目；模式切换递增代数，避免旧模式帧继续输出。
- * 颜色模式仅在终端支持时启用 ANSI，重定向时保持纯文本。
- *
- * @param name DBG 名字
- * @param on true=VOFA 纯文本；false=颜色模式
- * @return true 设置成功；false 名字不存在
- */
-bool Log::SetDebugVofa(const char* name, bool on)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    return dbg_.SetVofa(name, on);
-}
-
-/**
  * @brief DBG 流式打印，仅当前选中条目输出
  *
  * 在调用点格式化为自有文本，队列不保留调用方字符串或参数指针。
- * 输出模式取条目标志，发送优先级为 DBG。
+ * 终端支持时上 ANSI 颜色，发送优先级为 DBG。
  *
  * @param entry DBG 条目，FindOrCreateDebugEntry 返回值
  * @param fmt 格式化串
@@ -113,7 +97,7 @@ void Log::PrintSelectedDebug(LogEntry* entry, const char* fmt, ...)
     va_list ap;
     va_start(ap, fmt);
     const auto record = BuildRecordFromVaList(LogChannel::Debug, dbg_.ActiveEpoch(),
-                                              !entry->vofa && pump_.SupportsColor(), fmt, ap);
+                                              pump_.SupportsColor(), fmt, ap);
     va_end(ap);
     Submit(record);
 }
@@ -353,7 +337,7 @@ void Log::SendCommandLine(const char* text)
 }
 
 /**
- * @brief log list：遍历注册表输出名字、选中状态和输出模式
+ * @brief log list：遍历注册表输出名字与选中状态
  */
 void Log::PrintLogList()
 {
@@ -362,15 +346,14 @@ void Log::PrintLogList()
     {
         LogRecord record;
         record.channel = LogChannel::Command;
-        std::snprintf(record.text.data(), record.text.size(), "%s %s %s", entry->name.c_str(),
-                      entry == dbg_.Active() ? "[ON]" : "[off]",
-                      entry->vofa ? "[vofa]" : "[color]");
+        std::snprintf(record.text.data(), record.text.size(), "%s %s", entry->name.c_str(),
+                      entry == dbg_.Active() ? "[ON]" : "[off]");
         Submit(record);
     }
 }
 
 /**
- * @brief log 命令入口（list/on/off/mode）
+ * @brief log 命令入口（list/on/off）
  *
  * @param line 子命令参数，不含 log 前缀
  */
@@ -388,7 +371,7 @@ void Log::ProcessLogCommand(uint8_t* line)
     {
         if (*line != '\0')
         {
-            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            SendCommandLine("?: log list|on <name>|off");
             return;
         }
         PrintLogList();
@@ -399,7 +382,7 @@ void Log::ProcessLogCommand(uint8_t* line)
         line = NextToken(line, name);
         if (*name == '\0' || *line != '\0')
         {
-            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            SendCommandLine("?: log list|on <name>|off");
             return;
         }
         SendCommandLine(SelectDebugEntry(name) ? "log on: ok" : "log on: not found");
@@ -408,47 +391,18 @@ void Log::ProcessLogCommand(uint8_t* line)
     {
         if (*line != '\0')
         {
-            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            SendCommandLine("?: log list|on <name>|off");
             return;
         }
         DeselectDebugEntry();
         SendCommandLine("log off: ok");
     }
-    else if (std::strcmp(sub, "mode") == 0)
-    {
-        const char* name = nullptr;
-        const char* mode = nullptr;
-        line = NextToken(line, name);
-        line = NextToken(line, mode);
-        if (*name == '\0' || *mode == '\0')
-        {
-            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
-            return;
-        }
-        if (*line != '\0')
-        {
-            SendCommandLine("?: log mode <name> on|off");
-            return;
-        }
-        if (std::strcmp(mode, "on") == 0 || std::strcmp(mode, "vofa") == 0 ||
-            std::strcmp(mode, "off") == 0 || std::strcmp(mode, "color") == 0)
-        {
-            const bool on = std::strcmp(mode, "on") == 0 || std::strcmp(mode, "vofa") == 0;
-            SendCommandLine(SetDebugVofa(name, on)
-                                ? (on ? "log mode: vofa" : "log mode: color")
-                                : "log mode: not found");
-        }
-        else
-        {
-            SendCommandLine("?: log mode <name> on|off");
-        }
-    }
     else
     {
-        SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+        SendCommandLine("?: log list|on <name>|off");
     }
 }
 
-REGISTER_SHELL_CMD("log", "log list|on|off|mode", Log::ProcessLogCommand, log);
+REGISTER_SHELL_CMD("log", "log list|on|off", Log::ProcessLogCommand, log);
 
 } // namespace debug

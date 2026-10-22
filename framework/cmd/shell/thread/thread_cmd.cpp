@@ -45,7 +45,7 @@ static void FormatMs(uint64_t ns, char* out, size_t size)
  */
 static void CmdList()
 {
-    Log::SendCommandLine("THREAD          STATE     RUN      RETRY   FATAL   DROP    STACK");
+    Log::SendCommandLine("THREAD          STATE     RUN      RETRY   FATAL   DROP");
 
     const uint8_t count = thread_registry::Count();
     for (uint8_t i = 0; i < count; ++i)
@@ -57,11 +57,10 @@ static void CmdList()
         if (!t->GetStats(s)) continue;
 
         char line[128];
-        std::snprintf(line, sizeof(line), "%-15s %-9s %-8u %-7u %-7u %-7u %u",
+        std::snprintf(line, sizeof(line), "%-15s %-9s %-8u %-7u %-7u %u",
                       s.name, StateName(s),
                       static_cast<unsigned>(s.run_count), static_cast<unsigned>(s.retry_count),
-                      static_cast<unsigned>(s.fatal_count), static_cast<unsigned>(s.drop_count),
-                      static_cast<unsigned>(s.stack_unused));
+                      static_cast<unsigned>(s.fatal_count), static_cast<unsigned>(s.drop_count));
         Log::SendCommandLine(line);
     }
 
@@ -121,9 +120,6 @@ static void CmdShow(const char* name)
 
     FormatMs(s.run_ns, ms, sizeof(ms));
     std::snprintf(line, sizeof(line), "  total        %s ms", ms);
-    Log::SendCommandLine(line);
-
-    std::snprintf(line, sizeof(line), "  stack        %u B unused", static_cast<unsigned>(s.stack_unused));
     Log::SendCommandLine(line);
 }
 

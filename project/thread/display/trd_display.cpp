@@ -2,15 +2,15 @@
  * @file trd_display.cpp
  * @author qingyu
  * @brief 显示线程 — 订阅上游图像流，在主线程回调里原样显示
- * @version 0.1
- * @date 2026-10-13
+ * @version 0.2
+ * @date 2026-10-22
  *
  * @copyright Copyright (c) 2026
  *
  */
 
+#include "trd_display.hpp"
 #include "framework/cmd/config/config.hpp"
-#include "framework/cmd/shell/var/var.hpp"
 #include "framework/init/startup/Init_entry.hpp"
 #include "framework/init/startup/System_startup.hpp"
 #include "framework/topic/vision_to/vision_to.hpp"
@@ -19,17 +19,9 @@
 #include <mutex>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
-#include <stdexcept>
 
 namespace thread::display
 {
-
-static bool window_open_ = false;                            // 窗口状态，仅主线程访问
-static int  wait_ms_ = 50;                                   // 无新帧时回调最长等待，只为泵 Qt 事件
-
-static bool show_ = true;                                    // 显示开关：true 显示，false 不显示
-static std::mutex show_mutex_;                               // 保护显示开关，并作为条件变量的锁
-static std::condition_variable show_condition_;              // 开关变化时唤醒主线程回调
 
 static constexpr char kWindowName[] = "Camera";
 
@@ -68,33 +60,8 @@ bool TakeFrame(cv::Mat& image)
  */
 static bool ShowWanted()
 {
-    std::lock_guard<std::mutex> lock(show_mutex_);
-    return show_;
-}
-
-/**
- * @brief var 设置回调，由 shell 线程调用
- *
- * 只改开关并唤醒主线程：窗口的创建与销毁必须落在主线程（Qt 约束）。
- * 开关没有硬约束范围，所以用不带范围的 REGISTER_SHELL_VAR_NOTIFY 注册。
- *
- * @param entry 显示开关条目
- * @param value 新值，非 0 表示显示
- * @param context 被绑定的开关变量
- * @throws std::logic_error 上下文不是本模块的开关
- */
-static void SetShowFromVar(const debug::VarEntry& entry, double value, void* context)
-{
-    (void)entry; // 回调只用 value
-    if (context != &show_)
-    {
-        throw std::logic_error("invalid display context");
-    }
-    {
-        std::lock_guard<std::mutex> lock(show_mutex_);
-        show_ = value != 0.0;
-    }
-    show_condition_.notify_all();
+    std::lock_guard<std::mutex> lock(show_.mutex);
+    return show_.show;
 }
 
 /**
@@ -107,15 +74,15 @@ static void Display()
 {
     if (!ShowWanted())
     {
-        if (window_open_)
+        if (window_.open)
         {
-            window_open_ = false;
+            window_.open = false;
             cv::destroyWindow(kWindowName);
             cv::waitKey(1);
         }
         // 等待重新打开；带超时只为及时响应停止请求（回调跑在主线程，卡住会拖住关闭流程）
-        std::unique_lock<std::mutex> lock(show_mutex_);
-        show_condition_.wait_for(lock, std::chrono::milliseconds(wait_ms_), [] { return show_; });
+        std::unique_lock<std::mutex> lock(show_.mutex);
+        show_.condition.wait_for(lock, std::chrono::milliseconds(window_.wait_ms), [] { return show_.show; });
 
         return;
     }
@@ -123,17 +90,17 @@ static void Display()
     cv::Mat image;
     if (TakeFrame(image))
     {
-        if (!window_open_)
+        if (!window_.open)
         {
             cv::namedWindow(kWindowName, cv::WINDOW_NORMAL);
-            window_open_ = true;
+            window_.open = true;
         }
 
         // 原样显示：叠加内容由发布方画好，显示侧不做像素处理
         cv::imshow(kWindowName, image);
     }
 
-    if (window_open_)
+    if (window_.open)
     {
         const int key = cv::waitKey(1);
         if (key == 27 || key == 'q' || key == 'Q' ||
@@ -153,13 +120,13 @@ static void Display()
  * @return true 初始化成功
  * @throws std::exception 配置读取失败
  */
-bool display_init()
+static bool display_init()
 {
     cmd::config::Config yaml;
     yaml.Load("thread/display/trd_display.yaml", {"show_window", "wait_ms"});
 
-    show_    = yaml.GetBool("show_window"); // YAML 给启动初值，运行期由 display.show 接管
-    wait_ms_ = yaml.GetInt("wait_ms", 1, 1000);
+    show_.show      = yaml.GetBool("show_window"); // YAML 给启动初值，运行期由 display.show 接管
+    window_.wait_ms = yaml.GetInt("wait_ms", 1, 1000);
 
     System_SetMainLoop(Display);
     return true;
@@ -168,23 +135,18 @@ bool display_init()
 /**
  * @brief 注销主线程回调并销毁窗口，支持重复清理
  */
-void Release()
+static void Release()
 {
     System_SetMainLoop(nullptr);
 
-    if (window_open_)
+    if (window_.open)
     {
-        window_open_ = false; // 窗口的创建和销毁都归主线程，这里由 Release 回调执行
+        window_.open = false; // 窗口的创建和销毁都归主线程，这里由 Release 回调执行
         cv::destroyWindow(kWindowName);
         cv::waitKey(1);
     }
 }
 
 REGISTER_INIT(display_init, AppInit, High, HaltOnFail, Release, "display_init");
-
-/**
- * @brief 显示开关：非 0 显示、0 不显示；无范围约束，由 var 机制提交新值
- */
-REGISTER_SHELL_VAR_NOTIFY("display.show", show_, show_mutex_, SetShowFromVar, &show_);
 
 } // namespace thread::display

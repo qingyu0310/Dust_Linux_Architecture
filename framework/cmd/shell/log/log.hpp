@@ -34,7 +34,6 @@ public:
     static LogEntry* FindOrCreateDebugEntry(const char* name);                                                    // 按名字查 DBG 条目，首见创建（返回 nullptr=池满）
     static bool      SelectDebugEntry(const char* name);                                                          // 选中已注册条目，同一时间只保留一条
     static void      DeselectDebugEntry();                                                                        // 停止打印：清选中，代数递增作废在途 DBG 帧
-    static bool      SetDebugVofa(const char* name, bool on);                                                     // 设置 DBG 模式（on=VOFA 纯文本，off=颜色模式）
 
     static void PrintSelectedDebug(LogEntry* entry, const char* fmt, ...) __attribute__((format(printf, 2, 3)));  // DBG 流式打印：仅当前选中条目输出，形态取条目标志
     static void PrintInfo(const char* fmt, ...) __attribute__((format(printf, 1, 2)));                            // 一次性，黑色

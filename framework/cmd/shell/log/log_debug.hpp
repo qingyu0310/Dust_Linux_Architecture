@@ -1,7 +1,7 @@
 /**
  * @file log_debug.hpp
  * @author qingyu
- * @brief DUST_LOG DBG 源注册表：名字注册、单源选择与 VOFA 模式
+ * @brief DUST_LOG DBG 源注册表：名字注册与单源选择
  * @version 0.1
  * @date 2026-10-12
  *
@@ -24,7 +24,6 @@ constexpr size_t kMaxLogEntries = 64;
 struct LogEntry
 {
     std::string name;
-    bool vofa = false;
 };
 
 /**
@@ -56,7 +55,6 @@ public:
         }
         auto entry = &entries_[count_++];
         entry->name = name;
-        entry->vofa = false;
         return entry;
     }
 
@@ -69,18 +67,6 @@ public:
         }
         active_ = entry;
         ++epoch_;
-        return true;
-    }
-
-    bool SetVofa(const char* name, bool on)
-    {
-        auto entry = Find(name);
-        if (entry == nullptr)
-        {
-            return false;
-        }
-        entry->vofa = on;
-        ++epoch_; // 作废切换前的在途 DBG 帧。
         return true;
     }
 

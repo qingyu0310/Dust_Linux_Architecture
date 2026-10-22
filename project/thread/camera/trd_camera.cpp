@@ -1,29 +1,22 @@
 /**
  * @file trd_camera.cpp
  * @author qingyu
- * @brief 海康相机线程 — 参数读取、连续采集与实时图像显示
- * @version 0.1
- * @date 2026-10-12
+ * @brief 海康相机线程 — 参数读取、连续采集、断线重连与生命周期
+ * @version 0.2
+ * @date 2026-10-22
  *
  * @copyright Copyright (c) 2026
  *
  */
 
+#include "trd_camera.hpp"
 #include "framework/cmd/config/config.hpp"
 #include "framework/cmd/shell/log/log.hpp"
-#include "framework/cmd/shell/var/var.hpp"
 #include "framework/init/startup/Init_entry.hpp"
-#include "framework/init/semaphore.hpp"
 #include "framework/init/signal_handler.hpp"
-#include "framework/init/thread/thread.hpp"
-#include "framework/modules/camera/hikrobot.hpp"
 #include "framework/topic/camera_to/camera_to.hpp"
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
-#include <exception>
-#include <mutex>
 #include <opencv2/core.hpp>
 #include <stdexcept>
 #include <thread>
@@ -36,181 +29,6 @@ using namespace modules::camera;
 using namespace topic::camera_to;
 using namespace init;
 
-enum class Command
-{
-    SetExposure,
-    SetGain
-};
-
-/**
- * @brief shell 提交给相机线程的单条曝光或增益设置命令
- */
-struct CommandRequest
-{
-    Command command  = Command::SetExposure;
-    double requested_value = 0.0;
-    bool   pending   = false;                // 已提交待执行：提交者置位，相机线程取走
-    bool   executing = false;                // 正在执行 SDK 设置：相机线程置位
-    bool   completed = false;                // 结果可取：相机线程置位，提交者读走并清除
-    std::exception_ptr error;                // 执行结果：nullptr 表示成功
-};
-
-// 调参命令槽：同一时间只允许一条命令在途。
-// shell 线程填 request_ 并 Release 信号量，然后阻塞等 condition_；
-// 相机线程在 Task 循环里 TryAcquire 取走执行，做完置 completed 再唤醒提交者。
-static Semaphore      signal_ {0};                   // 计数信号量：通知相机线程有命令待执行
-static std::mutex     mutex_;                                       // 保护命令槽及执行结果
-static CommandRequest request_ {};
-static std::condition_variable condition_;                          // 提交者等待执行结果
-
-static int max_frame_gap_ms_ = 0;                                   // 连续无有效帧时限，单位 ms
-static std::atomic<bool> camera_ready_ {false};                  // 仅表示 Task 可以接受设置命令
-
-static HikRobot camera_ {};
-
-static Thread   thread_ {};
-
-/**
- * @brief 采集拍与拍之间要保留的状态
- *
- * 循环搬进线程外壳后，这些量不能再是任务体的局部变量，由 Task 的 context 带入。
- */
-struct CaptureState
-{
-    std::chrono::steady_clock::time_point last_frame {};    // 最近一帧的 SDK 时间戳
-    std::chrono::steady_clock::time_point last_report {};   // 上次 fps 汇总时刻
-    bool         first_frame = true;                        // 首帧分辨率只打一次
-    unsigned int frames      = 0;                           // 本汇总窗口内的帧数
-};
-
-static CaptureState capture_ {};
-
-/**
- * @brief 取消尚未执行的相机设置命令并唤醒 shell
- * @param error 返回给提交者的异常
- */
-static void CancelCommand(std::exception_ptr error)
-{
-    bool notify = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (request_.pending && !request_.executing)
-        {
-            request_.pending = false;
-            request_.completed = true;
-            request_.error = std::move(error);
-            notify = true;
-        }
-    }
-
-    if (notify)
-    {
-        condition_.notify_all();
-    }
-}
-
-/**
- * @brief 提交曝光或增益设置命令并等待相机线程返回 SDK 结果
- *
- * 由 shell 线程调用，提交后阻塞到相机线程做完；不做排队，在途命令占位时直接报忙。
- *
- * @param command 要执行的相机设置命令
- * @param requested_value 曝光时间或增益值
- * @throws std::exception 相机不可用、正在停止或 SDK 设置失败
- */
-static void SubmitCommand(Command command, double requested_value)
-{
-    if (!camera_ready_.load() || thread_.StopRequested()) {
-        throw std::runtime_error("camera unavailable");
-    }
-
-    std::unique_lock<std::mutex> lock(mutex_);
-    // 锁内复查：等锁期间停止流程可能已经清掉就绪标志或取消本命令
-    if (!camera_ready_.load() || thread_.StopRequested()) {
-        throw std::runtime_error("camera unavailable");
-    }
-    if (request_.pending || request_.executing || request_.completed) {
-        throw std::runtime_error("camera command busy");
-    }
-
-    request_.command = command;
-    request_.requested_value = requested_value;
-    request_.pending = true;
-    request_.error = nullptr;
-
-    signal_.Release();
-    condition_.wait(lock, [] { return request_.completed; });
-
-    auto error = request_.error;
-    request_.completed = false;
-    request_.error = nullptr;
-
-    lock.unlock();
-    if (error != nullptr)
-    {
-        std::rethrow_exception(error);
-    }
-}
-
-/**
- * @brief 非阻塞取出一条相机设置命令并执行 SDK 设置
- *
- * 用信号量而不是阻塞等待：采集循环不能被命令等待挡住。
- * SDK 调用不持 mutex_，否则 shell 提交新命令会被这几毫秒的写入挡住。
- */
-static void ExecuteCommand()
-{
-    if (!signal_.TryAcquire()) {
-        return;
-    }
-
-    Command command;
-    double requested_value;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!request_.pending)
-        {
-            return;
-        }
-
-        command = request_.command;
-        requested_value = request_.requested_value;
-        request_.pending = false;
-        request_.executing = true;
-    }
-
-    std::exception_ptr error;
-    try
-    {
-        if (command == Command::SetExposure)
-        {
-            camera_.SetExposure(requested_value);
-        }
-        else
-        {
-            camera_.SetGain(requested_value);
-        }
-    }
-    catch (...)
-    {
-        error = std::current_exception();
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        request_.executing = false;
-        request_.completed = true;
-        request_.error = error;
-    }
-    condition_.notify_all();
-
-    // 先让提交者拿到结果，再把同一个异常抛给框架：重连还是停止由恢复 hook 决定
-    if (error != nullptr)
-    {
-        std::rethrow_exception(error);
-    }
-}
-
 /**
  * @brief 初始化相机，参数仅从本线程所属 YAML 读取
  *
@@ -221,7 +39,7 @@ static void ExecuteCommand()
  * @return true 设备已打开；false 重试期间收到退出信号，启动中止
  * @throws std::exception 配置读取失败或非设备类初始化错误
  */
-bool thread_init()
+static bool thread_init()
 {
     HikRobot::Config config;
     cmd::config::Config yaml;
@@ -234,7 +52,7 @@ bool thread_init()
     config.gain        = yaml.GetDouble("gain_db",       0.0,   48.0);
     config.frame_rate  = yaml.GetInt("frame_rate",       1,     1000);
     config.timeout_ms  = yaml.GetInt("timeout_ms",       1,     1000);
-    max_frame_gap_ms_  = yaml.GetInt("max_frame_gap_ms", 1000,  60000);
+    run_.max_frame_gap_ms  = yaml.GetInt("max_frame_gap_ms", 1000,  60000);
 
     // 先等设备被系统枚举到，再初始化：设备没插时一次都不碰 MVS 运行时，
     // 反复 MV_CC_Initialize / MV_CC_Finalize 会把 SDK 拖进不稳定状态。
@@ -275,7 +93,7 @@ bool thread_init()
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
-    camera_ready_.store(true);
+    run_.ready.store(true);
     return true;
 }
 
@@ -286,7 +104,7 @@ bool thread_init()
  */
 static Thread::RecoveryAction Recover(const std::exception& error, Thread& worker, void*)
 {
-    camera_ready_.store(false);                      // 先切断新命令：重连期间不再往设备写设置
+    run_.ready.store(false);                      // 先切断新命令：重连期间不再往设备写设置
     CancelCommand(std::current_exception());
 
     const auto* fault = dynamic_cast<const HikRobotError*>(&error);
@@ -312,7 +130,7 @@ static Thread::RecoveryAction Recover(const std::exception& error, Thread& worke
         try
         {
             camera_.Reopen();
-            camera_ready_.store(true);
+            run_.ready.store(true);
 
             DUST_LOG_OK("camera ready; waiting for first frame");
 
@@ -379,7 +197,7 @@ static Thread::TaskResult Task(void* context)
         // 发布到相机话题：入槽即返回，没有订阅者取走的上一帧直接被覆盖丢弃
         pub_camera_to_.Publish({std::move(image), timestamp});
     }
-    else if (std::chrono::steady_clock::now() - state.last_frame >= std::chrono::milliseconds(max_frame_gap_ms_))
+    else if (std::chrono::steady_clock::now() - state.last_frame >= std::chrono::milliseconds(run_.max_frame_gap_ms))
     {
         // 抛给恢复 hook：重连还是停止由 Recover 决定，这里不自己重启设备
         throw HikRobotError("camera: no valid frame within max_frame_gap_ms", 0, true);
@@ -401,10 +219,10 @@ static Thread::TaskResult Task(void* context)
  * @brief 启动相机任务，业务循环由独立 Task 承载
  * @return true 线程创建成功
  */
-bool thread_start()
+static bool thread_start()
 {
     thread_.SetRecoveryHook(Recover);
-    thread_.Start(Task, &capture_, "camera");
+    thread_.Start(Task, std::chrono::milliseconds(0), &capture_, "camera");
 
     return true;
 }
@@ -412,9 +230,9 @@ bool thread_start()
 /**
  * @brief 通知采集任务停止，正在进行的 SDK 等待按配置超时返回
  */
-void thread_stop()
+static void thread_stop()
 {
-    camera_ready_.store(false);
+    run_.ready.store(false);
     thread_.RequestStop();
     pub_camera_to_.Close(); // 唤醒等帧的订阅者，让它们跟着一起退出
     CancelCommand(std::make_exception_ptr(std::runtime_error("camera stopping")));
@@ -423,7 +241,7 @@ void thread_stop()
 /**
  * @brief 等待采集任务退出，之后才允许关闭设备和清理帧缓存
  */
-void thread_join()
+static void thread_join()
 {
     thread_.Join();
     DUST_LOG_OK("camera thread joined");
@@ -433,9 +251,9 @@ void thread_join()
  * @brief 释放相机资源，支持初始化失败回滚和重复清理
  * @throws std::runtime_error SDK 清理失败
  */
-void Release()
+static void Release()
 {
-    camera_ready_.store(false);
+    run_.ready.store(false);
     CancelCommand(std::make_exception_ptr(std::runtime_error("camera stopping")));
 
     const bool stopped = camera_.Stop();
@@ -450,53 +268,5 @@ void Release()
 
 REGISTER_INIT(thread_init, EarlyInit, High, HaltOnFail, Release, "camera_init");
 REGISTER_THREAD(thread_start, EarlyThread, thread_stop, thread_join, "camera_start");
-
-/**
- * @brief 提交曝光请求，由相机线程设置设备并返回结果
- *
- * 在 shell 线程执行，会阻塞到相机线程设完；改设备必须绕这一圈，不能在 shell 里直接写 SDK。
- *
- * @param entry 相机类内曝光条目
- * @param value 已钳制曝光，单位 μs
- * @param context 相机实例
- * @throws std::exception 设备未就绪、正在停止或 SDK 设置失败
- */
-static void SetExposureFromVar(const debug::VarEntry& entry, double value, void* context)
-{
-    (void)entry; // 范围钳制已由 var 机制完成，回调只用 value
-    if (context != &camera_)
-    {
-        throw std::logic_error("invalid camera context");
-    }
-    SubmitCommand(Command::SetExposure, value / 1000.0); // var 用 μs，SDK 用 ms
-}
-
-REGISTER_SHELL_VAR_RANGE_NOTIFY("camera_exposure_us", camera_.GetParameters().exposure_us,
-    camera_.GetParameters().exposure_min_us, camera_.GetParameters().exposure_max_us,
-    camera_.GetParameters().mutex, SetExposureFromVar, &camera_);
-
-/**
- * @brief 提交增益请求，由相机线程设置设备并返回结果
- *
- * 与曝光同一条路径：shell 只提交，SDK 写入固定在相机线程。
- *
- * @param entry 相机类内增益条目
- * @param value 已钳制增益，单位 dB
- * @param context 相机实例
- * @throws std::exception 设备未就绪、正在停止或 SDK 设置失败
- */
-static void SetGainFromVar(const debug::VarEntry& entry, double value, void* context)
-{
-    (void)entry; // 范围钳制已由 var 机制完成，回调只用 value
-    if (context != &camera_)
-    {
-        throw std::logic_error("invalid camera context");
-    }
-    SubmitCommand(Command::SetGain, value);
-}
-
-REGISTER_SHELL_VAR_RANGE_NOTIFY("camera_gain_db", camera_.GetParameters().gain_db,
-    camera_.GetParameters().gain_min_db, camera_.GetParameters().gain_max_db,
-    camera_.GetParameters().mutex, SetGainFromVar, &camera_);
 
 } // namespace thread::camera

@@ -40,7 +40,6 @@ struct ThreadStats
     uint64_t    run_ns;             // 任务体累计执行时间
     uint64_t    max_run_ns;         // 单次最长执行时间
     uint64_t    last_run_ns;        // 最近一次执行时间
-    uint32_t    stack_unused;       // 栈剩余字节（Linux 不采集，恒为 0）
     bool        running;            // 线程是否仍在运行
     bool        paused;             // 是否被暂停
 };
@@ -137,47 +136,49 @@ public:
      */
     void SetRecoveryHook(RecoveryHook hook, void* context = nullptr)
     {
-        if (worker_.joinable())
+        if (life_.worker.joinable())
         {
             throw std::logic_error("cannot change recovery hook before thread is joined");
         }
-        recovery_hook_ = hook;
-        recovery_context_ = context;
+        task_.hook = hook;
+        task_.hook_context = context;
     }
 
     /**
-     * @brief 启动受管任务：外壳负责循环与停止判断，任务体只写一拍
+     * @brief 启动受管任务：外壳负责循环、周期等待与停止判断，任务体只写一拍
      *
      * @param entry 任务入口，每拍调用一次
+     * @param period 两拍之间的等待时长；0 表示任务自己阻塞，不额外等待
      * @param context 任务上下文，每拍原样传回
      * @param name Linux 线程名，最多 15 字节
      * @throws std::exception 入口无效、线程未回收或创建失败
      */
-    void Start(TaskFunc entry, void* context = nullptr, const char* name = nullptr)
+    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr)
     {
         if (entry == nullptr)
         {
             throw std::invalid_argument("thread entry is null");
         }
-        if (worker_.joinable())
+        if (life_.worker.joinable())
         {
             throw std::logic_error("thread already started");
         }
 
-        name_ = name == nullptr ? "" : name;
-        if (name_.size() > 15)
+        life_.name = name == nullptr ? "" : name;
+        if (life_.name.size() > 15)
         {
             throw std::invalid_argument("thread name exceeds 15 bytes");
         }
 
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = false;
+            std::lock_guard<std::mutex> lock(stop_.mutex);
+            stop_.stop = false;
         }
 
-        task_ = entry;
-        task_context_ = context;
-        worker_ = std::thread(&Thread::Run, this);
+        task_.entry = entry;
+        task_.period = period;
+        task_.context = context;
+        life_.worker = std::thread(&Thread::Run, this);
 
         RegisterThreadInstance(this);   // 登记到注册表，供 shell 的 thread 命令遍历
     }
@@ -190,7 +191,7 @@ public:
      */
     void SetWakeFd(int fd)
     {
-        wake_fd_ = fd;
+        stop_.wake_fd = fd;
     }
 
     /**
@@ -199,20 +200,20 @@ public:
     void RequestStop()
     {
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
+            std::lock_guard<std::mutex> lock(stop_.mutex);
+            stop_.stop = true;
         }
-        condition_.notify_all();
+        stop_.condition.notify_all();
 
         {
-            std::lock_guard<std::mutex> lock(pause_mutex_);
+            std::lock_guard<std::mutex> lock(pause_.mutex);
         }
-        pause_condition_.notify_all();   // 暂停中的线程也要能醒来退出
+        pause_.condition.notify_all();   // 暂停中的线程也要能醒来退出
 
-        if (wake_fd_ >= 0)
+        if (stop_.wake_fd >= 0)
         {
             const uint64_t one = 1;
-            const auto written = ::write(wake_fd_, &one, sizeof(one));
+            const auto written = ::write(stop_.wake_fd, &one, sizeof(one));
             (void)written; // EAGAIN 表示计数已饱和，等待方本来就可读
         }
     }
@@ -225,9 +226,9 @@ public:
      */
     bool WaitForStop(std::chrono::milliseconds duration)
     {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(stop_.mutex);
 
-        return condition_.wait_for(lock, duration, [this] { return stop_.load(); });
+        return stop_.condition.wait_for(lock, duration, [this] { return stop_.stop.load(); });
     }
 
     /**
@@ -237,7 +238,7 @@ public:
      */
     bool StopRequested() const
     {
-        return stop_.load();
+        return stop_.stop.load();
     }
 
     /**
@@ -245,20 +246,20 @@ public:
      */
     void Join()
     {
-        if (worker_.joinable())
+        if (life_.worker.joinable())
         {
-            worker_.join();
+            life_.worker.join();
         }
     }
 
     const char* Name() const override
     {
-        return name_.c_str();
+        return life_.name.c_str();
     }
 
     pthread_t Tid() const override
     {
-        return tid_.load();
+        return life_.tid.load();
     }
 
     /**
@@ -269,19 +270,18 @@ public:
      */
     bool GetStats(ThreadStats& out) const override
     {
-        out.name        = name_.c_str();
-        out.run_count   = run_count_.load();
-        out.retry_count = retry_count_.load();
-        out.fatal_count = fatal_count_.load();
-        out.drop_count  = drop_count_.load();
-        out.run_ns      = run_ns_.load();
-        out.max_run_ns  = max_run_ns_.load();
-        out.last_run_ns = last_run_ns_.load();
-        out.stack_unused = 0;   // Linux 不采集栈剩余
-        out.running     = started_.load() && !finished_.load();
+        out.name        = life_.name.c_str();
+        out.run_count   = counters_.run_count.load();
+        out.retry_count = counters_.retry_count.load();
+        out.fatal_count = counters_.fatal_count.load();
+        out.drop_count  = counters_.drop_count.load();
+        out.run_ns      = counters_.run_ns.load();
+        out.max_run_ns  = counters_.max_run_ns.load();
+        out.last_run_ns = counters_.last_run_ns.load();
+        out.running     = life_.started.load() && !life_.finished.load();
         out.paused      = Paused();
 
-        return started_.load();
+        return life_.started.load();
     }
 
     /**
@@ -289,13 +289,13 @@ public:
      */
     void ResetStats() override
     {
-        run_count_.store(0);
-        retry_count_.store(0);
-        fatal_count_.store(0);
-        drop_count_.store(0);
-        run_ns_.store(0);
-        max_run_ns_.store(0);
-        last_run_ns_.store(0);
+        counters_.run_count.store(0);
+        counters_.retry_count.store(0);
+        counters_.fatal_count.store(0);
+        counters_.drop_count.store(0);
+        counters_.run_ns.store(0);
+        counters_.max_run_ns.store(0);
+        counters_.last_run_ns.store(0);
     }
 
     /**
@@ -305,8 +305,8 @@ public:
      */
     void Pause() override
     {
-        std::lock_guard<std::mutex> lock(pause_mutex_);
-        paused_ = true;
+        std::lock_guard<std::mutex> lock(pause_.mutex);
+        pause_.paused = true;
     }
 
     /**
@@ -315,16 +315,16 @@ public:
     void Resume() override
     {
         {
-            std::lock_guard<std::mutex> lock(pause_mutex_);
-            paused_ = false;
+            std::lock_guard<std::mutex> lock(pause_.mutex);
+            pause_.paused = false;
         }
-        pause_condition_.notify_all();
+        pause_.condition.notify_all();
     }
 
     bool Paused() const override
     {
-        std::lock_guard<std::mutex> lock(pause_mutex_);
-        return paused_;
+        std::lock_guard<std::mutex> lock(pause_.mutex);
+        return pause_.paused;
     }
 
     /**
@@ -332,49 +332,84 @@ public:
      */
     void CountDrop()
     {
-        drop_count_.fetch_add(1);
+        counters_.drop_count.fetch_add(1);
     }
 
 private:
-    std::string name_;
-    std::thread worker_;
-    std::mutex  mutex_;
-    std::atomic<bool> stop_ {false};
-    std::condition_variable condition_;
+    /**
+     * @brief 线程句柄与生命周期状态
+     */
+    struct Lifecycle
+    {
+        std::string            name;                    // 线程名，最多 15 字节
+        std::thread            worker;                  // 工作线程
+        std::atomic<bool>      started  {false};     // 是否已启动过
+        std::atomic<bool>      finished {false};     // 线程入口是否已退出
+        std::atomic<pthread_t> tid {};                  // 线程号
+    };
 
-    mutable std::mutex      pause_mutex_;           // 保护暂停标志
-    std::condition_variable pause_condition_;       // 暂停/恢复时唤醒外壳
-    bool                    paused_ = false;        // 拍间挂起标志
+    /**
+     * @brief 停止请求与等待
+     */
+    struct StopSignal
+    {
+        std::mutex              mutex;                  // 保护停止标志
+        std::atomic<bool>       stop {false};        // 停止请求
+        std::condition_variable condition;              // 停止时唤醒等待者
+        int                     wake_fd = -1;           // 停止唤醒描述符；-1 表示业务线程不使用 poll 等待
+    };
 
-    std::atomic<bool>      started_  {false};       // 是否已启动过
-    std::atomic<bool>      finished_ {false};       // 线程入口是否已退出
-    std::atomic<pthread_t> tid_ {};                 // 线程号
+    /**
+     * @brief 拍间暂停状态
+     */
+    struct PauseState
+    {
+        bool               paused = false;              // 拍间挂起标志
+        mutable std::mutex mutex;                       // 保护暂停标志
+        std::condition_variable condition;              // 暂停/恢复时唤醒外壳
+    };
 
-    int wake_fd_ = -1;                                  // 停止唤醒描述符；-1 表示业务线程不使用 poll 等待
+    /**
+     * @brief 受管任务与异常恢复
+     */
+    struct TaskSlot
+    {
+        TaskFunc     entry = nullptr;                   // 受管任务入口
+        void*        context = nullptr;                 // 受管任务上下文
+        RecoveryHook hook = nullptr;                    // 可选业务异常恢复入口
+        void*        hook_context = nullptr;            // 由调用方持有的恢复上下文
+        std::chrono::milliseconds period {0};      // 两拍之间的等待时长；0 表示不额外等待
+    };
 
-    void*        recovery_context_ = nullptr;           // 由调用方持有的恢复上下文
-    RecoveryHook recovery_hook_    = nullptr;           // 可选业务异常恢复入口
+    /**
+     * @brief 运行统计计数
+     */
+    struct Counters
+    {
+        std::atomic<uint32_t> run_count   {0};      // 任务体进入次数
+        std::atomic<uint32_t> retry_count {0};      // 可恢复错误次数
+        std::atomic<uint32_t> fatal_count {0};      // 不可恢复错误次数
+        std::atomic<uint32_t> drop_count  {0};      // 业务计数
+        std::atomic<uint64_t> run_ns      {0};      // 累计执行时间
+        std::atomic<uint64_t> max_run_ns  {0};      // 单次最长执行时间
+        std::atomic<uint64_t> last_run_ns {0};      // 最近一次执行时间
+    };
 
-    TaskFunc     task_             = nullptr;           // 受管任务入口
-    void*        task_context_     = nullptr;           // 受管任务上下文
-
-    std::atomic<uint32_t> run_count_   {0};             // 任务体进入次数
-    std::atomic<uint32_t> retry_count_ {0};             // 可恢复错误次数
-    std::atomic<uint32_t> fatal_count_ {0};             // 不可恢复错误次数
-    std::atomic<uint32_t> drop_count_  {0};             // 业务计数
-    std::atomic<uint64_t> run_ns_      {0};             // 累计执行时间
-    std::atomic<uint64_t> max_run_ns_  {0};             // 单次最长执行时间
-    std::atomic<uint64_t> last_run_ns_ {0};             // 最近一次执行时间
+    Lifecycle  life_;
+    StopSignal stop_;
+    PauseState pause_;
+    TaskSlot   task_;
+    Counters   counters_;
 
     /**
      * @brief 拍间挂起，返回 false 表示挂起期间收到了停止请求
      */
     bool WaitWhilePaused()
     {
-        std::unique_lock<std::mutex> lock(pause_mutex_);
-        pause_condition_.wait(lock, [this] { return !paused_ || stop_.load(); });
+        std::unique_lock<std::mutex> lock(pause_.mutex);
+        pause_.condition.wait(lock, [this] { return !pause_.paused || stop_.stop.load(); });
 
-        return !stop_.load();
+        return !stop_.stop.load();
     }
 
     /**
@@ -383,11 +418,11 @@ private:
     void RecordRun(std::chrono::steady_clock::duration elapsed)
     {
         const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
-        run_ns_.fetch_add(ns);
-        last_run_ns_.store(ns);
+        counters_.run_ns.fetch_add(ns);
+        counters_.last_run_ns.store(ns);
 
-        uint64_t longest = max_run_ns_.load();
-        while (ns > longest && !max_run_ns_.compare_exchange_weak(longest, ns))
+        uint64_t longest = counters_.max_run_ns.load();
+        while (ns > longest && !counters_.max_run_ns.compare_exchange_weak(longest, ns))
         {
         }
     }
@@ -400,12 +435,12 @@ private:
      */
     void Run()
     {
-        started_.store(true);
-        tid_.store(pthread_self());
+        life_.started.store(true);
+        life_.tid.store(pthread_self());
 
         try
         {
-            if (!name_.empty() && pthread_setname_np(pthread_self(), name_.c_str()) != 0)
+            if (!life_.name.empty() && pthread_setname_np(pthread_self(), life_.name.c_str()) != 0)
             {
                 throw std::runtime_error("cannot set thread name");
             }
@@ -418,12 +453,12 @@ private:
                 }
 
                 const auto begin = std::chrono::steady_clock::now();
-                run_count_.fetch_add(1);
+                counters_.run_count.fetch_add(1);
 
                 TaskResult result = TaskResult::Continue;
                 try
                 {
-                    result = task_(task_context_);
+                    result = task_.entry(task_.context);
                 }
                 catch (const std::exception& error)
                 {
@@ -432,13 +467,13 @@ private:
                         break;
                     }
 
-                    if (recovery_hook_ == nullptr)
+                    if (task_.hook == nullptr)
                     {
                         throw;
                     }
 
-                    retry_count_.fetch_add(1);
-                    if (recovery_hook_(error, *this, recovery_context_) != RecoveryAction::Restart)
+                    counters_.retry_count.fetch_add(1);
+                    if (task_.hook(error, *this, task_.hook_context) != RecoveryAction::Restart)
                     {
                         throw;
                     }
@@ -448,24 +483,29 @@ private:
 
                 if (result == TaskResult::Fatal)
                 {
-                    fatal_count_.fetch_add(1);
-                    DUST_LOG_ERR("thread %s fatal", name_.c_str());
+                    counters_.fatal_count.fetch_add(1);
+                    DUST_LOG_ERR("thread %s fatal", life_.name.c_str());
                     break;
                 }
 
                 if (result == TaskResult::Retry)
                 {
-                    retry_count_.fetch_add(1);
-                    if (recovery_hook_ == nullptr)
+                    counters_.retry_count.fetch_add(1);
+                    if (task_.hook == nullptr)
                     {
                         break;
                     }
 
                     const std::runtime_error retry("task retry");
-                    if (recovery_hook_(retry, *this, recovery_context_) != RecoveryAction::Restart)
+                    if (task_.hook(retry, *this, task_.hook_context) != RecoveryAction::Restart)
                     {
                         break;
                     }
+                }
+
+                if (task_.period.count() > 0)
+                {
+                    WaitForStop(task_.period);   // 周期等待；收到停止请求时下一轮退出
                 }
             }
         }
@@ -479,7 +519,7 @@ private:
             System_RequestStop(1);
         }
 
-        finished_.store(true);
+        life_.finished.store(true);
     }
 };
 } // namespace init

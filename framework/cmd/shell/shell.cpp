@@ -386,7 +386,7 @@ static bool thread_start()
     }
     
     thread_.SetWakeFd(Log::WakeFd());
-    thread_.Start(Task, &input_state_, "shell");
+    thread_.Start(Task, std::chrono::milliseconds(0), &input_state_, "shell");
 
     return true;
 }
