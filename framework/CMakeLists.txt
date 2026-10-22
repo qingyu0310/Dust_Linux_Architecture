@@ -81,18 +81,26 @@ target_link_libraries(framework_topic INTERFACE ${OpenCV_LIBS})
 # ============================================================================
 
 add_library(framework_core STATIC
-    init/Init_entry.cpp 
+    init/startup/Init_entry.cpp
     init/signal_handler.cpp)
 if(CONFIG_DUST_CMD_SHELL_LOG)
-    target_sources(framework_core PRIVATE cmd/shell/log.cpp cmd/shell/log_transport.cpp)
+    target_sources(framework_core PRIVATE cmd/shell/log/log.cpp cmd/shell/log/log_transport.cpp)
 endif()
 if(CONFIG_DUST_CMD_SHELL_VAR)
-    target_sources(framework_core PRIVATE cmd/shell/var.cpp)
+    target_sources(framework_core PRIVATE cmd/shell/var/var.cpp)
 endif()
 if(CONFIG_DUST_CMD_CONFIG)
     target_sources(framework_core PRIVATE cmd/config/config.cpp)
 endif()
-target_include_directories(framework_core PUBLIC ${PROJECT_SOURCE_DIR})
+# 各子目录加入全局 include：业务线程仍然只写 #include "thread.hpp" / "Init_entry.hpp"
+target_include_directories(framework_core PUBLIC
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/init/startup
+    ${CMAKE_CURRENT_SOURCE_DIR}/init/thread
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/log
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/var
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/thread)
 target_link_libraries(framework_core PUBLIC Threads::Threads yaml-cpp)
 target_compile_options(framework_core PRIVATE -Wall -Wextra -Wpedantic)
 

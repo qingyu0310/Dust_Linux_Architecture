@@ -13,9 +13,9 @@
 #include "framework/algorithm/vision/pose/armor_pose.hpp"
 #include "framework/algorithm/vision/track/multi_target.hpp"
 #include "framework/cmd/config/config.hpp"
-#include "framework/cmd/shell/log.hpp"
-#include "framework/init/Init_entry.hpp"
-#include "framework/init/thread.hpp"
+#include "framework/cmd/shell/log/log.hpp"
+#include "framework/init/startup/Init_entry.hpp"
+#include "framework/init/thread/thread.hpp"
 #include "framework/topic/camera_to/camera_to.hpp"
 #include "framework/topic/vision_to/vision_to.hpp"
 #include <algorithm>
@@ -172,6 +172,19 @@ static Subscriber sub_camera_to {pub_camera_to_};             // vision 独占�
 static Thread thread_ {};                                               // 识别工作线程
 
 /**
+ * @brief 识别拍与拍之间要保留的状态
+ *
+ * 循环搬进线程外壳后，统计窗口和上次汇报时刻不能再是任务体的局部变量，由 Task 的 context 带入。
+ */
+struct VisionState
+{
+    ReportWindow                          report {};                       // 当前一秒统计窗口
+    std::chrono::steady_clock::time_point last_report {};                  // 上次汇总时刻
+};
+
+static VisionState vision_state_ {};
+
+/**
  * @brief 把装甲板颜色转换为日志字符串
  * @param color 工程颜色枚举
  * @return 固定字符串 red、blue 或 unknown
@@ -244,8 +257,8 @@ static void LoadVisionConfig(ArmorDetector::Config& detector_config)
     detector_config.score_threshold      = static_cast<float>(yaml.GetDouble("score_threshold", 0.0, 1.0));
     detector_config.confidence_threshold = static_cast<float>(yaml.GetDouble("confidence_threshold", 0.0, 1.0));
 
-    camera_intrinsics_.image_width           = yaml.GetInt("image_width",   1,          100000);
-    camera_intrinsics_.image_height          = yaml.GetInt("image_height",  1,          100000);
+    camera_intrinsics_.image_width       = yaml.GetInt("image_width",   1,          100000);
+    camera_intrinsics_.image_height      = yaml.GetInt("image_height",  1,          100000);
 
     camera_intrinsics_.fx                    = yaml.GetDouble("camera_fx",  1.0,        1000000.0);
     camera_intrinsics_.fy                    = yaml.GetDouble("camera_fy",  1.0,        1000000.0);
@@ -354,8 +367,7 @@ static CameraModel ToCameraModel(const CameraIntrinsics& intrinsics)
  * @param extrinsics 相机相对云台的外参
  * @param color 该目标的绘制颜色
  */
-static void DrawFaces(cv::Mat& drawn, const std::vector<ArmorState>& faces, const ArmorDimensions& dimensions,
-                      const CameraModel& camera, const GimbalExtrinsics& extrinsics, const cv::Scalar& color)
+static void DrawFaces(cv::Mat& drawn, const std::vector<ArmorState>& faces, const ArmorDimensions& dimensions, const CameraModel& camera, const GimbalExtrinsics& extrinsics, const cv::Scalar& color)
 {
     const std::optional<std::array<cv::Point3f, 4>> object_points = MakeObjectPoints(ArmorSize::Small, dimensions);
     if (!object_points)
@@ -509,72 +521,65 @@ static void LogReport(const ReportWindow& report, double elapsed)
 /**
  * @brief 取最新帧同步推理；慢于相机时沿用单槽通道的丢旧帧语义
  */
-static void Task(void*, void*, void*)
+static Thread::TaskResult Task(void* context)
 {
+    auto& state = *static_cast<VisionState*>(context);
+
     if (!detector_) {
         throw std::runtime_error("vision detector is not initialized");
     }
 
-    ReportWindow report;
-    auto last_report = std::chrono::steady_clock::now();
+    // 阻塞等待相机最新帧；相机通道关闭时退出识别线程
+    Message message;
+    if (!sub_camera_to.Wait(message)) {
+        return Thread::TaskResult::Fatal;
+    }
 
-    while (!thread_.StopRequested())
+    // 对当前相机帧同步执行预处理、TensorRT 推理和后处理
+    const auto processing_begin = std::chrono::steady_clock::now();
+    ArmorDetectionResult result = detector_->Detect(message.image);
+
+    #ifdef CONFIG_DUST_VISION_YOLO_REFINER
     {
-        // 阻塞等待相机最新帧；相机通道关闭时退出识别线程
-        Message message;
-        if (!sub_camera_to.Wait(message)) {
-            break;
-        }
-
-        // 对当前相机帧同步执行预处理、TensorRT 推理和后处理
-        const auto processing_begin = std::chrono::steady_clock::now();
-        ArmorDetectionResult result = detector_->Detect(message.image);
-
-        #ifdef CONFIG_DUST_VISION_YOLO_REFINER
+        if (refiner_)
         {
-            if (refiner_)
+            for (DetectedArmor& armor : result.armors)
             {
-                for (DetectedArmor& armor : result.armors)
+                const ArmorRefinementResult refinement = refiner_->Refine(message.image, armor.GetCorners());
+                if (!refinement.Applied())
                 {
-                    const ArmorRefinementResult refinement = refiner_->Refine(message.image, armor.GetCorners());
-                    if (!refinement.Applied())
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    const std::optional<DetectedArmor> refined = armor.WithCorners(refinement.final_corners, message.image.size());
-                    if (refined)
-                    {
-                        armor = *refined;
-                    }
+                const std::optional<DetectedArmor> refined = armor.WithCorners(refinement.final_corners, message.image.size());
+                if (refined)
+                {
+                    armor = *refined;
                 }
             }
         }
-        #endif
-
-        const auto   now = std::chrono::steady_clock::now();
-        const double processing_ms         = std::chrono::duration<double, std::milli>(now - processing_begin).count();
-        const double age_ms                = std::chrono::duration<double, std::milli>(now - message.timestamp).count();
-        report.Add(result, age_ms);
-
-        // 停止期间不再发布刚完成的结果，避免关闭后的结果通道被重新写入
-        if (thread_.StopRequested()) {
-            break;
-        }
-
-        // 位姿在这一帧内解完并直接描在发布帧上；原图不动，显示侧照旧只转发
-        cv::Mat overlay = DrawPoses(message.image, result.armors, report);
-        topic::vision_to::pub_vision_to_.Publish({overlay, message.timestamp, std::move(result.armors), processing_ms});
-
-        // 日志每秒汇总一次，避免逐帧输出影响实时识别
-        const double elapsed = std::chrono::duration<double>(now - last_report).count();
-        if (elapsed >= 1.0)
-        {
-            LogReport(report, elapsed);
-            report.Clear();
-            last_report = now;
-        }
     }
+    #endif
+
+    const auto   now = std::chrono::steady_clock::now();
+    const double processing_ms         = std::chrono::duration<double, std::milli>(now - processing_begin).count();
+    const double age_ms                = std::chrono::duration<double, std::milli>(now - message.timestamp).count();
+    state.report.Add(result, age_ms);
+
+    // 位姿在这一帧内解完并直接描在发布帧上；原图不动，显示侧照旧只转发
+    cv::Mat overlay = DrawPoses(message.image, result.armors, state.report);
+    topic::vision_to::pub_vision_to_.Publish({overlay, message.timestamp, std::move(result.armors), processing_ms});
+
+    // 日志每秒汇总一次，避免逐帧输出影响实时识别
+    const double elapsed = std::chrono::duration<double>(now - state.last_report).count();
+    if (elapsed >= 1.0)
+    {
+        LogReport(state.report, elapsed);
+        state.report.Clear();
+        state.last_report = now;
+    }
+
+    return Thread::TaskResult::Continue;
 }
 
 /**
@@ -611,7 +616,8 @@ bool thread_init()
  */
 bool thread_start()
 {
-    thread_.Start(Task, nullptr, "vision");
+    vision_state_.last_report = std::chrono::steady_clock::now();
+    thread_.Start(Task, &vision_state_, "vision");
     return true;
 }
 

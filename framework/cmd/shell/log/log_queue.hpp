@@ -49,8 +49,7 @@ public:
             size_t victim = count_;
             for (size_t i = 0; i < count_; ++i)
             {
-                if (frames_[i].priority > frame.priority &&
-                    (victim == count_ || frames_[i].priority > frames_[victim].priority))
+                if (frames_[i].priority > frame.priority && (victim == count_ || frames_[i].priority > frames_[victim].priority))
                 {
                     victim = i;
                 }

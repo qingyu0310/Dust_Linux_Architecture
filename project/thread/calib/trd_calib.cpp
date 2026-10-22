@@ -11,11 +11,11 @@
 
 #include "framework/algorithm/calib/camera_calib.hpp"
 #include "framework/cmd/config/config.hpp"
-#include "framework/cmd/shell/log.hpp"
-#include "framework/cmd/shell/var.hpp"
-#include "framework/init/Init_entry.hpp"
-#include "framework/init/System_startup.hpp"
-#include "framework/init/thread.hpp"
+#include "framework/cmd/shell/log/log.hpp"
+#include "framework/cmd/shell/var/var.hpp"
+#include "framework/init/startup/Init_entry.hpp"
+#include "framework/init/startup/System_startup.hpp"
+#include "framework/init/thread/thread.hpp"
 #include "framework/topic/camera_to/camera_to.hpp"
 #include "framework/topic/vision_to/vision_to.hpp"
 
@@ -85,6 +85,21 @@ static bool solved_ {false};                                        // 本轮是
 
 static bool capture_request_ {false};                               // shell 的快门请求：非 0 表示按了一次快门
 static std::mutex capture_mutex_;                                   // 保护快门请求，同时作为该 var 条目的锁
+
+/**
+ * @brief 标定拍与拍之间要保留的状态
+ *
+ * 循环搬进线程外壳后，这些量不能再是任务体的局部变量，由 Task 的 context 带入。
+ */
+struct CaptureState
+{
+    std::chrono::steady_clock::time_point deadline {};       // 采集总时限的绝对时刻
+    std::chrono::steady_clock::time_point next_accept {};    // 下次允许保留样本的时刻
+    std::chrono::steady_clock::time_point next_report {};    // 下次进度汇报的时刻
+    std::int32_t shots = 0;                                  // 本汇报周期内的快门次数
+};
+
+static CaptureState capture_ {};
 
 /**
  * @brief 读取本组件 YAML：字段全部必需
@@ -265,95 +280,90 @@ static void FinishIfComplete()
  * 快门那一帧要过四道才算合格：识别出完整圆点阵、签名可算、与已保留样本够不同、
  * 距上次保留够 sample_interval_ms。不合格的打一行说明原因、不占样本位，要重试就再按一次。
  */
-static void Task(void*, void*, void*)
+static Thread::TaskResult Task(void* context)
 {
-    const auto deadline    = std::chrono::steady_clock::now() + std::chrono::seconds(params_.capture_timeout_s);
-    auto       next_accept = std::chrono::steady_clock::now();
-    auto       next_report = next_accept;
+    auto& state = *static_cast<CaptureState*>(context);
 
-    std::int32_t shots = 0; // 本周期的快门次数
-
-    while (!thread_.StopRequested())
+    // 阻塞等待相机最新帧；相机通道关闭时退出标定线程
+    topic::camera_to::Message message;
+    if (!sub_camera_to.Wait(message))
     {
-        // 阻塞等待相机最新帧；相机通道关闭时退出标定线程
-        topic::camera_to::Message message;
-        if (!sub_camera_to.Wait(message))
-        {
-            break;
-        }
-
-        if (std::chrono::steady_clock::now() >= deadline)
-        {
-            DUST_LOG_ERR("calib: only %zu of %d samples within %ds", samples_.size(), params_.sample_count, params_.capture_timeout_s);
-            System_RequestStop(1);
-            return;
-        }
-
-        // 每帧都识别一次：结果既画进转发的图，也是快门判合格的第一道
-        std::vector<cv::Point2f> centers;
-        const bool detected = algorithm::calib::DetectBoard(message.image, params_.board, centers);
-
-        // 识别结果为空：这一帧只是画面，没有待发布的装甲板结果
-        topic::vision_to::pub_vision_to_.Publish({DrawCenters(message.image, centers), message.timestamp, {}, 0.0});
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= next_report)
-        {
-            DUST_LOG_INF("calib: waiting samples=%zu/%d shots=%d detected=%s", samples_.size(), params_.sample_count, shots, detected ? "yes" : "no");
-            next_report = now + std::chrono::seconds(kProgressIntervalS);
-            shots       = 0;
-        }
-
-        if (!TakeShotRequest())
-        {
-            continue; // 没按快门就只当预览
-        }
-        ++shots;
-
-        if (!detected)
-        {
-            DUST_LOG_WRN("calib: shot dropped: no circle grid in the frame");
-            continue;
-        }
-
-        const std::optional<SampleShape> shape = algorithm::calib::MeasureShape(params_.board, centers);
-        if (!shape)
-        {
-            DUST_LOG_WRN("calib: shot dropped: degenerate circle grid");
-            continue;
-        }
-        if (!algorithm::calib::IsDistinctSample(*shape, shapes_, params_.gate))
-        {
-            DUST_LOG_WRN("calib: shot dropped: pose repeats a kept sample");
-            continue;
-        }
-        if (std::chrono::steady_clock::now() < next_accept)
-        {
-            DUST_LOG_WRN("calib: shot dropped: within sample_interval_ms of the last kept sample");
-            continue;
-        }
-
-        // 先落图再记账：图写不出去说明目录有问题，这时上报比留一批没图的样本好
-        const std::string name = std::to_string(samples_.size() + 1) + ".jpg";
-        const std::string path = params_.samples_dir + "/" + name;
-        if (!cv::imwrite(path, message.image))
-        {
-            DUST_LOG_ERR("calib: cannot write %s", path.c_str());
-            System_RequestStop(1);
-            return;
-        }
-
-        // 存的是原始帧：圆心坐标要对应未被标记污染的像素
-        image_size_ = message.image.size();
-        shapes_.push_back(*shape);
-        samples_.push_back(std::move(centers));
-        next_accept = std::chrono::steady_clock::now() + std::chrono::milliseconds(params_.sample_interval_ms);
-
-        DUST_LOG_INF("calib: sample %zu/%d center=(%.0f,%.0f) span=%.0fpx pitch=%.2f yaw=%.2f -> %s", samples_.size(), params_.sample_count, shape->center.x,
-                     shape->center.y, shape->span_px, shape->pitch_ratio, shape->yaw_ratio, name.c_str());
-
-        FinishIfComplete();
+        return Thread::TaskResult::Fatal;
     }
+
+    if (std::chrono::steady_clock::now() >= state.deadline)
+    {
+        DUST_LOG_ERR("calib: only %zu of %d samples within %ds", samples_.size(), params_.sample_count, params_.capture_timeout_s);
+        System_RequestStop(1);
+        return Thread::TaskResult::Fatal;
+    }
+
+    // 每帧都识别一次：结果既画进转发的图，也是快门判合格的第一道
+    std::vector<cv::Point2f> centers;
+    const bool detected = algorithm::calib::DetectBoard(message.image, params_.board, centers);
+
+    // 识别结果为空：这一帧只是画面，没有待发布的装甲板结果
+    topic::vision_to::pub_vision_to_.Publish({DrawCenters(message.image, centers), message.timestamp, {}, 0.0});
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= state.next_report)
+    {
+        DUST_LOG_INF("calib: waiting samples=%zu/%d shots=%d detected=%s", samples_.size(), params_.sample_count, state.shots, detected ? "yes" : "no");
+        state.next_report = now + std::chrono::seconds(kProgressIntervalS);
+        state.shots       = 0;
+    }
+
+    if (!TakeShotRequest())
+    {
+        return Thread::TaskResult::Continue; // 没按快门就只当预览
+    }
+    ++state.shots;
+
+    if (!detected)
+    {
+        DUST_LOG_WRN("calib: shot dropped: no circle grid in the frame");
+        return Thread::TaskResult::Continue;
+    }
+
+    const std::optional<SampleShape> shape = algorithm::calib::MeasureShape(params_.board, centers);
+    if (!shape)
+    {
+        DUST_LOG_WRN("calib: shot dropped: degenerate circle grid");
+        return Thread::TaskResult::Continue;
+    }
+    if (!algorithm::calib::IsDistinctSample(*shape, shapes_, params_.gate))
+    {
+        DUST_LOG_WRN("calib: shot dropped: pose repeats a kept sample");
+        return Thread::TaskResult::Continue;
+    }
+    if (std::chrono::steady_clock::now() < state.next_accept)
+    {
+        DUST_LOG_WRN("calib: shot dropped: within sample_interval_ms of the last kept sample");
+        return Thread::TaskResult::Continue;
+    }
+
+    // 先落图再记账：图写不出去说明目录有问题，这时上报比留一批没图的样本好
+    const std::string name = std::to_string(samples_.size() + 1) + ".jpg";
+    const std::string path = params_.samples_dir + "/" + name;
+    if (!cv::imwrite(path, message.image))
+    {
+        DUST_LOG_ERR("calib: cannot write %s", path.c_str());
+        System_RequestStop(1);
+        return Thread::TaskResult::Fatal;
+    }
+
+    // 存的是原始帧：圆心坐标要对应未被标记污染的像素
+    image_size_ = message.image.size();
+    shapes_.push_back(*shape);
+    samples_.push_back(std::move(centers));
+    state.next_accept = std::chrono::steady_clock::now() + std::chrono::milliseconds(params_.sample_interval_ms);
+
+    DUST_LOG_INF("calib: sample %zu/%d center=(%.0f,%.0f) span=%.0fpx pitch=%.2f yaw=%.2f -> %s", samples_.size(), params_.sample_count, shape->center.x,
+                 shape->center.y, shape->span_px, shape->pitch_ratio, shape->yaw_ratio, name.c_str());
+
+    FinishIfComplete();
+
+    return Thread::TaskResult::Continue;
 }
 
 /**
@@ -387,7 +397,11 @@ bool thread_init()
  */
 bool thread_start()
 {
-    thread_.Start(Task, nullptr, "calib");
+    capture_.deadline    = std::chrono::steady_clock::now() + std::chrono::seconds(params_.capture_timeout_s);
+    capture_.next_accept = std::chrono::steady_clock::now();
+    capture_.next_report = capture_.next_accept;
+
+    thread_.Start(Task, &capture_, "calib");
     return true;
 }
 

@@ -12,10 +12,12 @@
 #
 # ============================================================================
 
-add_executable(vision_app ${PROJECT_SOURCE_DIR}/framework/init/main.cpp)
+add_executable(vision_app ${PROJECT_SOURCE_DIR}/framework/init/startup/main.cpp)
 
 if(CONFIG_DUST_CMD_SHELL)
-    target_sources(vision_app PRIVATE ${PROJECT_SOURCE_DIR}/framework/cmd/shell/shell.cpp)
+    target_sources(vision_app PRIVATE
+        ${PROJECT_SOURCE_DIR}/framework/cmd/shell/shell.cpp
+        ${PROJECT_SOURCE_DIR}/framework/cmd/shell/thread/thread_cmd.cpp)
 endif()
 
 # 业务线程：各线程按自己的 Kconfig 开关装配
@@ -68,8 +70,8 @@ target_compile_options(vision_app PRIVATE
     -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections)
 target_link_options(vision_app PRIVATE "LINKER:--disable-new-dtags")
 target_link_options(vision_app PRIVATE
-    "LINKER:-T,${PROJECT_SOURCE_DIR}/framework/init/dust_init.ld"
+    "LINKER:-T,${PROJECT_SOURCE_DIR}/framework/cmd/linker/dust_init.ld"
     "LINKER:--gc-sections"
     "LINKER:-Map,${CMAKE_CURRENT_BINARY_DIR}/vision_app.map")
 set_property(TARGET vision_app APPEND PROPERTY LINK_DEPENDS
-    ${PROJECT_SOURCE_DIR}/framework/init/dust_init.ld)
+    ${PROJECT_SOURCE_DIR}/framework/cmd/linker/dust_init.ld)

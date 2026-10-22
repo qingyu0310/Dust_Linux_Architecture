@@ -9,6 +9,8 @@
  */
 
 #include "var.hpp"
+#include "shell_cmd.hpp"
+#include "token.hpp"
 #include "log.hpp"
 #include <cerrno>
 #include <cmath>
@@ -17,7 +19,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -222,17 +223,17 @@ static void FormatValue(VarType type, const VarValue& value, char* out, size_t s
 {
     switch (type)
     {
-        case VarType::Uint8:  std::snprintf(out, size, "%u", static_cast<unsigned int>(value.u8));  break;
-        case VarType::Int8:   std::snprintf(out, size, "%d", static_cast<int>(value.i8));           break;
-        case VarType::Uint16: std::snprintf(out, size, "%u", static_cast<unsigned int>(value.u16)); break;
-        case VarType::Int16:  std::snprintf(out, size, "%d", static_cast<int>(value.i16));          break;
-        case VarType::Uint32: std::snprintf(out, size, "%u", value.u32);                            break;
-        case VarType::Int32:  std::snprintf(out, size, "%d", value.i32);                            break;
+        case VarType::Uint8:  std::snprintf(out, size, "%u", static_cast<unsigned int>(value.u8));          break;
+        case VarType::Int8:   std::snprintf(out, size, "%d", static_cast<int>(value.i8));                   break;
+        case VarType::Uint16: std::snprintf(out, size, "%u", static_cast<unsigned int>(value.u16));         break;
+        case VarType::Int16:  std::snprintf(out, size, "%d", static_cast<int>(value.i16));                  break;
+        case VarType::Uint32: std::snprintf(out, size, "%u", value.u32);                                    break;
+        case VarType::Int32:  std::snprintf(out, size, "%d", value.i32);                                    break;
         case VarType::Uint64: std::snprintf(out, size, "%llu", static_cast<unsigned long long>(value.u64)); break;
-        case VarType::Int64:  std::snprintf(out, size, "%lld", static_cast<long long>(value.i64));  break;
-        case VarType::Float:  std::snprintf(out, size, "%.9g", static_cast<double>(value.f));       break;
-        case VarType::Double: std::snprintf(out, size, "%.9g", value.d);                            break;
-        case VarType::Bool:   std::snprintf(out, size, "%s", value.b ? "true" : "false");           break;
+        case VarType::Int64:  std::snprintf(out, size, "%lld", static_cast<long long>(value.i64));          break;
+        case VarType::Float:  std::snprintf(out, size, "%.9g", static_cast<double>(value.f));               break;
+        case VarType::Double: std::snprintf(out, size, "%.9g", value.d);                                    break;
+        case VarType::Bool:   std::snprintf(out, size, "%s", value.b ? "true" : "false");                   break;
     }
 }
 
@@ -333,8 +334,8 @@ static void SetNotifiedValue(const VarEntry& entry, double value)
         std::lock_guard<std::mutex> lock(*entry.mutex);
         const double minimum = entry.minimum != nullptr ? ValueAsDouble(entry, entry.minimum) : 0.0;
         const double maximum = entry.maximum != nullptr ? ValueAsDouble(entry, entry.maximum) : 0.0;
-        if ((entry.minimum != nullptr && !std::isfinite(minimum)) || (entry.maximum != nullptr && !std::isfinite(maximum)) ||
-            (entry.minimum != nullptr && entry.maximum != nullptr && minimum > maximum))
+        
+        if ((entry.minimum != nullptr && !std::isfinite(minimum)) || (entry.maximum != nullptr && !std::isfinite(maximum)) || (entry.minimum != nullptr && entry.maximum != nullptr && minimum > maximum))
         {
             throw std::invalid_argument("invalid variable range");
         }
@@ -363,11 +364,16 @@ static void SetNotifiedValue(const VarEntry& entry, double value)
  */
 void Var::Process(uint8_t* line)
 {
-    std::istringstream input(reinterpret_cast<char*>(line));
-    std::string command, name, value, extra;
-    input >> command;
-    if (command == "list" && !(input >> extra))
+    const char* command = nullptr;
+    line = NextToken(line, command);
+
+    if (std::strcmp(command, "list") == 0)
     {
+        if (*line != '\0')
+        {
+            Log::SendCommandLine("?: var list|get <name>|set <name> <value>");
+            return;
+        }
         if (entries_.empty())
         {
             Log::SendCommandLine("(none)");
@@ -380,19 +386,27 @@ void Var::Process(uint8_t* line)
         }
         return;
     }
-    if ((command != "get" && command != "set") || !(input >> name) ||
-        (command == "set" && !(input >> value)) || (input >> extra))
+
+    const bool  get = std::strcmp(command, "get") == 0;
+    const bool  set = std::strcmp(command, "set") == 0;
+    const char* name  = nullptr;
+    const char* value = nullptr;
+    line = NextToken(line, name);
+    line = NextToken(line, value);
+
+    if ((!get && !set) || *name == '\0' || (set && *value == '\0') || *line != '\0' || (get && *value != '\0'))
     {
         Log::SendCommandLine("?: var list|get <name>|set <name> <value>");
         return;
     }
+
     const auto* entry = Find(name);
     if (entry == nullptr)
     {
         Log::SendCommandLine("variable not found");
         return;
     }
-    if (command == "get")
+    if (get)
     {
         std::lock_guard<std::mutex> lock(*entry->mutex);
         PrintVar(*entry);
@@ -400,11 +414,12 @@ void Var::Process(uint8_t* line)
     }
 
     VarValue parsed {};
-    if (!ParseValue(entry->type, value.c_str(), parsed))
+    if (!ParseValue(entry->type, value, parsed))
     {
         Log::SendCommandLine("bad value");
         return;
     }
+
     const double number = ToDouble(entry->type, parsed);
     if (!std::isfinite(number))
     {
@@ -434,5 +449,7 @@ void Var::Process(uint8_t* line)
         Log::SendCommandLine("variable setter failed");
     }
 }
+
+REGISTER_SHELL_CMD("var", "var list|get|set", Var::Process, var);
 
 } // namespace debug

@@ -10,70 +10,90 @@
  */
 
 #include "shell.hpp"
+#include "shell_cmd.hpp"
+#include "token.hpp"
 #include "var.hpp"
 #include "log.hpp"
-#include "framework/init/Init_entry.hpp"
-#include "framework/init/thread.hpp"
+#include "framework/init/startup/Init_entry.hpp"
+#include "framework/init/thread/thread.hpp"
 #include <poll.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace debug
 {
+    
 static Shell shell_{};
 static init::Thread thread_{};
 
 /**
- * @brief 输出当前已实现的日志和变量调试命令
+ * @brief 调试台拍与拍之间要保留的状态
+ *
+ * 循环搬进线程外壳后，输入是否仍打开不能再是任务体的局部变量，由 Task 的 context 带入。
  */
-void Shell::CmdHelp() const
+struct InputState
 {
-    Log::SendCommandLine("var list|get <name>|set <name> <value>");
-    Log::SendCommandLine("log list                列出 DBG 条目");
-    Log::SendCommandLine("log on <name>           选择一条 DBG 日志");
-    Log::SendCommandLine("log off                 停止 DBG 输出");
-    Log::SendCommandLine("log mode <name> on|off  VOFA 纯文本/颜色模式");
+    bool input_open = true;    // stdin 仍可读；EOF 或描述符故障后只驱动发送泵
+};
+
+static InputState input_state_ {};
+
+/**
+ * @brief 输出帮助：遍历命令表，每族一行
+ *
+ * 命令族由各模块 REGISTER_SHELL_CMD 注册，帮助文本随注册项自动出现。
+ */
+void Shell::PrintHelp()
+{
+    for (const ShellCmdEntry* e = __start_shell_cmd; e < __stop_shell_cmd; ++e)
+    {
+        char line[80];
+        std::snprintf(line, sizeof(line), "%-8s %s", e->name, e->help);
+        Log::SendCommandLine(line);
+    }
 }
 
 /**
- * @brief 解析一行命令并分派到对应命令族
- * @param line 行缓冲指针，解析时会修改内容
+ * @brief 解析一行命令并按命令表分派
+ *
+ * 取第一个 token 作为命令族名，在 shell_cmd 段内线性匹配，
+ * 命中则把剩余参数串交给该族的 handler。
+ *
+ * @param line 行缓冲指针（可写，解析时会被修改）
  */
 void Shell::ProcessLine(uint8_t* line)
 {
-    auto text = reinterpret_cast<char*>(line);
-    while (*text == ' ')
+    const char* cmd = nullptr;
+    uint8_t* rest   = NextToken(line, cmd);
+
+    if (*cmd == '\0') return;
+
+    for (const ShellCmdEntry* e = __start_shell_cmd; e < __stop_shell_cmd; ++e)
     {
-        ++text;
+        if (std::strcmp(e->name, cmd) == 0)
+        {
+            e->handler(rest);
+            return;
+        }
     }
-    char* arguments = text;
-    while (*arguments != '\0' && *arguments != ' ')
-    {
-        ++arguments;
-    }
-    if (*arguments == ' ')
-    {
-        *arguments++ = '\0';
-    }
-    if (std::strcmp(text, "log") == 0)
-    {
-        Log::ProcessLogCommand(reinterpret_cast<uint8_t*>(arguments));
-    }
-    else if (std::strcmp(text, "var") == 0)
-    {
-        Var::Process(reinterpret_cast<uint8_t*>(arguments));
-    }
-    else if (std::strcmp(text, "h") == 0 || std::strcmp(text, "?") == 0)
-    {
-        CmdHelp();
-    }
-    else if (*text != '\0')
-    {
-        Log::SendCommandLine("?: log/var/h");
-    }
+
+    Log::SendCommandLine("unknown command");
 }
+
+/**
+ * @brief 帮助命令入口（注册到命令表）
+ * @param args 未使用
+ */
+static void HelpCmd(uint8_t* args)
+{
+    (void)args;
+    Shell::PrintHelp();
+}
+
+REGISTER_SHELL_CMD("h", "help", HelpCmd, help);
 
 /**
  * @brief 处理输入字节，回显通过日志后端统一输出
@@ -98,6 +118,67 @@ void Shell::ProcessInput(const char* buffer, size_t size, StopCheck stopping, Se
  *
  * 命令最长 255 字节；超长后整行丢弃，不执行截断命令。
  */
+void Shell::PushHistory(const std::string& command)
+{
+    if (command.empty())
+    {
+        return;
+    }
+    if (history_count_ > 0 && history_[history_count_ - 1] == command)
+    {
+        return; // 相邻重复不重复记录
+    }
+
+    if (history_count_ < kHistorySize)
+    {
+        history_[history_count_++] = command;
+    }
+    else
+    {
+        for (size_t i = 1; i < kHistorySize; ++i)
+        {
+            history_[i - 1] = std::move(history_[i]);
+        }
+        history_[kHistorySize - 1] = command;
+    }
+
+    history_pos_ = history_count_;
+}
+
+/**
+ * @brief 上方向键：先存下当前草稿，再回看更早的一条
+ */
+void Shell::HistoryPrev()
+{
+    if (history_count_ == 0 || history_pos_ == 0)
+    {
+        return;
+    }
+    if (history_pos_ == history_count_)
+    {
+        history_draft_ = line_; // 首次进入历史：记住还没提交的半行
+    }
+
+    --history_pos_;
+    line_   = history_[history_pos_];
+    cursor_ = line_.size();
+}
+
+/**
+ * @brief 下方向键：逐条回到最新，越过最新后恢复草稿
+ */
+void Shell::HistoryNext()
+{
+    if (history_count_ == 0 || history_pos_ == history_count_)
+    {
+        return;
+    }
+
+    ++history_pos_;
+    line_   = history_pos_ == history_count_ ? history_draft_ : history_[history_pos_];
+    cursor_ = line_.size();
+}
+
 bool Shell::ProcessChar(char ch)
 {
     bool command_boundary = false;
@@ -139,6 +220,14 @@ bool Shell::ProcessChar(char ch)
         {
             line_.erase(cursor_, 1);
         }
+        else if (escape_ == "\x1b[A" || escape_ == "\x1bOA")
+        {
+            HistoryPrev();
+        }
+        else if (escape_ == "\x1b[B" || escape_ == "\x1bOB")
+        {
+            HistoryNext();
+        }
         escape_.clear();
     }
     else if (ch == '\x1b')
@@ -153,6 +242,7 @@ bool Shell::ProcessChar(char ch)
         Log::CommitInput();
         if (!discard_line_ && !line_.empty())
         {
+            PushHistory(line_); // 必须在 ProcessLine 之前：它会原地把行切成 token
             ProcessLine(reinterpret_cast<uint8_t*>(line_.data()));
         }
         line_.clear();
@@ -211,75 +301,64 @@ static void ServiceCommands()
 }
 
 /**
- * @brief 独立调试台任务；输入、待发帧和停止请求三选一才醒，stdin EOF 后只等发送泵
+ * @brief 调试台单拍：输入、待发帧任一就绪即醒，stdin EOF 后只等发送泵
+ *
+ * @param context 本线程的输入状态
+ * @return Continue=继续下一拍
  */
-static void Task(void*, void*, void*)
+static init::Thread::TaskResult Task(void* context)
 {
-    Log::MarkShellThreadReady();
-    bool input_open = true;
+    auto& state = *static_cast<InputState*>(context);
 
-    for (;;)
+    pollfd descriptors[2] = {
+        {STDIN_FILENO,  POLLIN, 0},
+        {Log::WakeFd(), POLLIN, 0}
+    };
+
+    if (!state.input_open) {
+        descriptors[0] = descriptors[1];
+    }
+    const nfds_t count = state.input_open ? 2 : 1;
+
+    const int ready = ::poll(descriptors, count, -1);
+    if (ready < 0)
     {
-        pollfd descriptors[2] = {
-            {STDIN_FILENO,  POLLIN, 0},
-            {Log::WakeFd(), POLLIN, 0}
-        };
-
-        if (!input_open) {
-            descriptors[0] = descriptors[1];
-        }
-        const nfds_t count = input_open ? 2 : 1;
-
-        const int ready = ::poll(descriptors, count, -1);
-        if (ready < 0)
+        if (errno == EINTR)
         {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            input_open = false; // 输入描述符故障：退回只驱动发送泵
-            continue;
+            return init::Thread::TaskResult::Continue;
         }
-
-        if (thread_.StopRequested()) {
-            break;
-        }
-
-        if (input_open && (descriptors[0].revents & (POLLIN | POLLHUP)))
-        {
-            char buffer[256];
-            const auto size = ::read(STDIN_FILENO, buffer, sizeof(buffer));
-            if (size == 0)
-            {
-                input_open = false;
-                Log::EndInput();
-            }
-            else if (size < 0 && errno != EINTR && errno != EAGAIN)
-            {
-                input_open = false;
-            }
-            if (size > 0)
-            {
-                shell_.ProcessInput(buffer, static_cast<size_t>(size), ShellStopping, ServiceCommands);
-            }
-        }
-        if (input_open && (descriptors[0].revents & (POLLERR | POLLNVAL)))
-        {
-            input_open = false;
-        }
-
-        Log::ConsumeWake(); // 先清计数再发送：发送期间入队的帧会重新置位，poll 立刻返回
-
-        Log::SendNextFrameIfIdle();
-
-        if (thread_.StopRequested())
-        {
-            break;
-        }
+        state.input_open = false; // 输入描述符故障：退回只驱动发送泵
+        return init::Thread::TaskResult::Continue;
     }
 
-    Log::EndInput();
-    Log::Flush();
+    if (state.input_open && (descriptors[0].revents & (POLLIN | POLLHUP)))
+    {
+        char buffer[256];
+        const auto size = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (size == 0)
+        {
+            state.input_open = false;
+            Log::EndInput();
+        }
+        else if (size < 0 && errno != EINTR && errno != EAGAIN)
+        {
+            state.input_open = false;
+        }
+        if (size > 0)
+        {
+            shell_.ProcessInput(buffer, static_cast<size_t>(size), ShellStopping, ServiceCommands);
+        }
+    }
+    if (state.input_open && (descriptors[0].revents & (POLLERR | POLLNVAL)))
+    {
+        state.input_open = false;
+    }
+
+    Log::ConsumeWake(); // 先清计数再发送：发送期间入队的帧会重新置位，poll 立刻返回
+
+    Log::SendNextFrameIfIdle();
+
+    return init::Thread::TaskResult::Continue;
 }
 
 /**
@@ -305,8 +384,10 @@ static bool thread_start()
     {
         return false; // 日志未初始化成功，宁可不启动也不退化成定时轮询
     }
+    
     thread_.SetWakeFd(Log::WakeFd());
-    thread_.Start(Task, nullptr, "shell");
+    thread_.Start(Task, &input_state_, "shell");
+
     return true;
 }
 

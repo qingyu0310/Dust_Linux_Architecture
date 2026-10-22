@@ -110,7 +110,7 @@ Task 抛出异常后，原来的任务调用栈已经展开，局部资源按正
 | 层级 | 职责 |
 | --- | --- |
 | `framework/modules/camera` | SDK 调用、设备资源、同步取帧、明确的故障信息 |
-| `framework/init/thread.hpp` | 捕获任务异常、调用可选恢复 hook、判断停止与重新执行 |
+| `framework/init/thread/thread.hpp` | 捕获任务异常、调用可选恢复 hook、判断停止与重新执行 |
 | `project/thread/camera` | 无帧时限、故障恢复策略、重连等待、重新初始化设备 |
 | 主线程显示回调 | OpenCV 窗口创建、图像显示和窗口事件处理 |
 

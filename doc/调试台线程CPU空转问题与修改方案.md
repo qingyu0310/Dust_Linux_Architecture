@@ -10,7 +10,7 @@
 
 现象：没有输入、也没有日志输出的时候，shell 线程仍在持续占用 CPU，在 `top -H` / `pidstat -t` 里能看到它。
 
-本文的判断是：占用来自**固定频率的空转唤醒**，不是它干了多少活。所以先量唤醒次数，再量 CPU 时间。程序用 `dust run` 起，线程名是 `shell`（[thread.hpp:131](../framework/init/thread.hpp#L131) 里 `pthread_setname_np`）。
+本文的判断是：占用来自**固定频率的空转唤醒**，不是它干了多少活。所以先量唤醒次数，再量 CPU 时间。程序用 `dust run` 起，线程名是 `shell`（[thread.hpp:131](../framework/init/thread/thread.hpp#L131) 里 `pthread_setname_np`）。
 
 ```bash
 pid=$(pgrep -x vision_app)
@@ -253,7 +253,7 @@ static void Task(void*, void*, void*)
 
 ### 3.4 落点四：`Thread` 支持"停止时唤醒"
 
-文件：[framework/init/thread.hpp](../framework/init/thread.hpp)
+文件：[framework/init/thread/thread.hpp](../framework/init/thread/thread.hpp)
 
 ```cpp
 // 新增：在 Start() 之前调用；仅用于以 poll 等待的业务线程
@@ -378,7 +378,7 @@ pidstat -t -p "$pid" 1        # 看 shell 行的 %SYSTEM 是否远大于 %usr
 | 文件 | 改动 |
 | --- | --- |
 | [framework/cmd/shell/log.hpp](../framework/cmd/shell/log.hpp)、[log.cpp](../framework/cmd/shell/log.cpp) | 新增 `WakeFd()`、`ConsumeWake()`；`Init()` 创建 `eventfd`；`Submit()` 入队后唤醒 |
-| [framework/init/thread.hpp](../framework/init/thread.hpp) | 新增 `SetWakeFd()`、`StopRequested()`；`RequestStop()` 追加唤醒；`stop_` 改 `std::atomic` |
+| [framework/init/thread/thread.hpp](../framework/init/thread/thread.hpp) | 新增 `SetWakeFd()`、`StopRequested()`；`RequestStop()` 追加唤醒；`stop_` 改 `std::atomic` |
 | [framework/cmd/shell/shell.cpp](../framework/cmd/shell/shell.cpp) | `Task()` 改成阻塞 `poll`；`thread_start()` 绑定唤醒描述符 |
 
 **不动的：** 帧池大小与优先级策略（[log_policy.hpp](../framework/cmd/shell/log_policy.hpp)）、`FormatRecordToFrame` 的帧格式、终端重绘协议、`REGISTER_INIT`/`REGISTER_THREAD` 宏与阶段顺序、`temp/Dust_Zephyr_Tree` 下的参考实现。

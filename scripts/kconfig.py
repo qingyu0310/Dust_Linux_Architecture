@@ -333,7 +333,8 @@ def main():
 
     for name in order:
         symbol = symbols[name]
-        print(f"{'y' if symbol.value == 'y' else 'n'}  CONFIG_{name}")
+        if symbol.value == 'y':
+            print(f"y  CONFIG_{name}")
     for problem in problems:
         print(f"错误: {problem}", file=sys.stderr)
     for warning in warnings:

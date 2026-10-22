@@ -10,12 +10,12 @@
  */
 
 #include "framework/cmd/config/config.hpp"
-#include "framework/cmd/shell/log.hpp"
-#include "framework/cmd/shell/var.hpp"
-#include "framework/init/Init_entry.hpp"
+#include "framework/cmd/shell/log/log.hpp"
+#include "framework/cmd/shell/var/var.hpp"
+#include "framework/init/startup/Init_entry.hpp"
 #include "framework/init/semaphore.hpp"
 #include "framework/init/signal_handler.hpp"
-#include "framework/init/thread.hpp"
+#include "framework/init/thread/thread.hpp"
 #include "framework/modules/camera/hikrobot.hpp"
 #include "framework/topic/camera_to/camera_to.hpp"
 #include <atomic>
@@ -69,6 +69,21 @@ static std::atomic<bool> camera_ready_ {false};                  // 仅表示 Ta
 static HikRobot camera_ {};
 
 static Thread   thread_ {};
+
+/**
+ * @brief 采集拍与拍之间要保留的状态
+ *
+ * 循环搬进线程外壳后，这些量不能再是任务体的局部变量，由 Task 的 context 带入。
+ */
+struct CaptureState
+{
+    std::chrono::steady_clock::time_point last_frame {};    // 最近一帧的 SDK 时间戳
+    std::chrono::steady_clock::time_point last_report {};   // 上次 fps 汇总时刻
+    bool         first_frame = true;                        // 首帧分辨率只打一次
+    unsigned int frames      = 0;                           // 本汇总窗口内的帧数
+};
+
+static CaptureState capture_ {};
 
 /**
  * @brief 取消尚未执行的相机设置命令并唤醒 shell
@@ -321,76 +336,65 @@ static Thread::RecoveryAction Recover(const std::exception& error, Thread& worke
 }
 
 /**
- * @brief 连续采集并提交最新帧，由主线程显示图像
+ * @brief 采集一帧并提交，由主线程显示图像
  *
- * SDK 限时等待后检查停止标志；不在采集线程调用任何窗口 API。
- * 连续无有效帧或 SDK 取帧失败时进入重连，等待可由停止请求唤醒。
+ * 一拍取一帧：SDK 限时等待后返回，不在采集线程调用任何窗口 API。
+ * 连续无有效帧或 SDK 取帧失败时抛给恢复 hook，由它决定重连还是停止。
+ *
+ * @param context 本线程的采集状态
+ * @return Continue=继续下一拍；失败经异常交给恢复 hook
  */
-static void Task(void*, void*, void*)
+static Thread::TaskResult Task(void* context)
 {
-    auto last_frame  = std::chrono::steady_clock::now();
-    auto last_report = last_frame;
+    auto& state = *static_cast<CaptureState*>(context);
 
-    bool first_frame = true;
-    unsigned int frames = 0;
-
-    while (!thread_.StopRequested())
+    if (!camera_.IsOpen())
     {
-        if (!camera_.IsOpen()) 
-        {
-            // 启动时设备没就绪，或运行中掉线：交给恢复 hook 重连，不在业务循环里自己重试
-            throw HikRobotError("camera is not ready", 0, true);
-        }
-
-        ExecuteCommand();
-
-        if (thread_.StopRequested()) {
-            break;
-        }
-
-        cv::Mat image;
-        std::chrono::steady_clock::time_point timestamp;
-
-        bool     received     = camera_.Read(image, timestamp);
-        uint32_t frame_number = camera_.GetFrameNumber();
-
-        if (received)
-        {
-            // SDK 等待期间收到停止请求：丢掉这一帧，不再往下走
-            if (thread_.StopRequested()) {
-                break;
-            }
-
-            // 相机安装方向上下、左右均相反；-1 同时翻转两个轴，相当于旋转 180° 后再发布
-            cv::flip(image, image, -1);
-
-            last_frame = timestamp; // 以 SDK 帧时间戳为准，本地时间只用于统计
-            ++frames;
-
-            if (first_frame)
-            {
-                DUST_LOG_OK("camera image: %d x %d BGR", image.cols, image.rows);
-                first_frame = false;
-            }
-
-            // 发布到相机话题：入槽即返回，没有订阅者取走的上一帧直接被覆盖丢弃
-            pub_camera_to_.Publish({std::move(image), timestamp});
-        }
-        else if (std::chrono::steady_clock::now() - last_frame >= std::chrono::milliseconds(max_frame_gap_ms_))
-        {
-            // 抛给恢复 hook：重连还是停止由 Recover 决定，这里不自己重启设备
-            throw HikRobotError("camera: no valid frame within max_frame_gap_ms", 0, true);
-        }
-
-        const auto   now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last_report).count();
-        if (elapsed >= 1.0)
-        {
-            DUST_LOG_DBG("camera", "fps=%.1f frame=%u published=%llu", frames / elapsed, frame_number, static_cast<unsigned long long>(pub_camera_to_.Published()));
-            frames      = 0;
-            last_report = now;
-        }
+        // 启动时设备没就绪，或运行中掉线：交给恢复 hook 重连，不在业务循环里自己重试
+        throw HikRobotError("camera is not ready", 0, true);
     }
+
+    ExecuteCommand();
+
+    cv::Mat image;
+    std::chrono::steady_clock::time_point timestamp;
+
+    bool     received     = camera_.Read(image, timestamp);
+    uint32_t frame_number = camera_.GetFrameNumber();
+
+    if (received)
+    {
+        // 相机安装方向上下、左右均相反；-1 同时翻转两个轴，相当于旋转 180° 后再发布
+        cv::flip(image, image, -1);
+
+        state.last_frame = timestamp; // 以 SDK 帧时间戳为准，本地时间只用于统计
+        ++state.frames;
+
+        if (state.first_frame)
+        {
+            DUST_LOG_OK("camera image: %d x %d BGR", image.cols, image.rows);
+            state.first_frame = false;
+        }
+
+        // 发布到相机话题：入槽即返回，没有订阅者取走的上一帧直接被覆盖丢弃
+        pub_camera_to_.Publish({std::move(image), timestamp});
+    }
+    else if (std::chrono::steady_clock::now() - state.last_frame >= std::chrono::milliseconds(max_frame_gap_ms_))
+    {
+        // 抛给恢复 hook：重连还是停止由 Recover 决定，这里不自己重启设备
+        throw HikRobotError("camera: no valid frame within max_frame_gap_ms", 0, true);
+    }
+
+    const auto   now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - state.last_report).count();
+    if (elapsed >= 1.0)
+    {
+        DUST_LOG_DBG("camera", "fps=%.1f frame=%u published=%llu", state.frames / elapsed, frame_number, static_cast<unsigned long long>(pub_camera_to_.Published()));
+        state.frames      = 0;
+        state.last_report = now;
+    }
+
+    return Thread::TaskResult::Continue;
 }
 
 /**
@@ -400,7 +404,7 @@ static void Task(void*, void*, void*)
 bool thread_start()
 {
     thread_.SetRecoveryHook(Recover);
-    thread_.Start(Task, nullptr, "camera");
+    thread_.Start(Task, &capture_, "camera");
 
     return true;
 }

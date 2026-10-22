@@ -154,12 +154,14 @@ bool LogTransport::UpdateInput(const char* line, size_t cursor)
     {
         return true;
     }
+
     const size_t length = std::strlen(line);
     if (length >= input_.size() || cursor > length)
     {
         error_ = EINVAL;
         return false;
     }
+
     std::memcpy(input_.data(), line, length + 1);
     cursor_ = cursor;
     return DrawInput();
@@ -174,6 +176,7 @@ bool LogTransport::CommitInput()
     {
         return true;
     }
+
     input_[0] = '\0';
     cursor_ = 0;
     return Write("\r\n", 2);
@@ -188,6 +191,7 @@ bool LogTransport::EndInput()
     {
         return true;
     }
+    
     const bool output_ok = Write("\r\x1b[2K", 5);
     if (::tcsetattr(STDIN_FILENO, TCSANOW, &saved_) != 0)
     {

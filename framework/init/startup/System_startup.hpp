@@ -17,12 +17,14 @@
  * @throws std::exception 重复启动、注册项排序冲突或资源分配失败
  */
 bool System_Startup();
+
 /**
  * @brief 请求进程停止，可由业务线程调用
  *
  * @param exit_code 0 表示正常停止；非零状态在关闭时保留
  */
 void System_RequestStop(int exit_code = 0);
+
 /**
  * @brief 设置主线程事件回调，由统一等待循环调用
  *
@@ -30,10 +32,12 @@ void System_RequestStop(int exit_code = 0);
  * @note 仅由主线程设置，回调异常转为统一错误停止
  */
 void System_SetMainLoop(void (*callback)());
+
 /**
  * @brief 主线程等待退出信号或业务线程的停止请求
  */
 void System_WaitForStop();
+
 /**
  * @brief 通知全部线程停止，再逆序等待和释放资源；支持重复调用
  *

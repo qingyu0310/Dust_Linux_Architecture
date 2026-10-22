@@ -13,8 +13,8 @@
 #include "framework/algorithm/vision/pose/armor_pose.hpp"
 #include "framework/algorithm/vision/track/armor_tracker.hpp"
 #include "framework/algorithm/vision/track/multi_target.hpp"
-#include "framework/init/Init_entry.hpp"
-#include "framework/cmd/shell/log.hpp"
+#include "framework/init/startup/Init_entry.hpp"
+#include "framework/cmd/shell/log/log.hpp"
 #include <array>
 #include <cmath>
 #include <cstdint>

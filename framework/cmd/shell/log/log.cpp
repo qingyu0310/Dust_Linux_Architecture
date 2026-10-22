@@ -10,9 +10,11 @@
  */
 
 #include "log.hpp"
-#include "framework/init/System_startup.hpp"
-#include <sstream>
-#include <string>
+#include "shell_cmd.hpp"
+#include "token.hpp"
+#include "framework/init/startup/System_startup.hpp"
+#include <cstdio>
+#include <cstring>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -378,28 +380,61 @@ void Log::ProcessLogCommand(uint8_t* line)
     {
         return;
     }
-    std::istringstream input(reinterpret_cast<const char*>(line));
-    std::string command, name, mode, extra;
-    input >> command;
-    if (command == "list" && !(input >> extra))
+
+    const char* sub = nullptr;
+    line = NextToken(line, sub);
+
+    if (std::strcmp(sub, "list") == 0)
     {
+        if (*line != '\0')
+        {
+            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            return;
+        }
         PrintLogList();
     }
-    else if (command == "on" && (input >> name) && !(input >> extra))
+    else if (std::strcmp(sub, "on") == 0)
     {
-        SendCommandLine(SelectDebugEntry(name.c_str()) ? "log on: ok" : "log on: not found");
+        const char* name = nullptr;
+        line = NextToken(line, name);
+        if (*name == '\0' || *line != '\0')
+        {
+            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            return;
+        }
+        SendCommandLine(SelectDebugEntry(name) ? "log on: ok" : "log on: not found");
     }
-    else if (command == "off" && !(input >> extra))
+    else if (std::strcmp(sub, "off") == 0)
     {
+        if (*line != '\0')
+        {
+            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            return;
+        }
         DeselectDebugEntry();
         SendCommandLine("log off: ok");
     }
-    else if (command == "mode" && (input >> name >> mode) && !(input >> extra))
+    else if (std::strcmp(sub, "mode") == 0)
     {
-        if (mode == "on" || mode == "vofa" || mode == "off" || mode == "color")
+        const char* name = nullptr;
+        const char* mode = nullptr;
+        line = NextToken(line, name);
+        line = NextToken(line, mode);
+        if (*name == '\0' || *mode == '\0')
         {
-            const bool on = mode == "on" || mode == "vofa";
-            SendCommandLine(SetDebugVofa(name.c_str(), on)
+            SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
+            return;
+        }
+        if (*line != '\0')
+        {
+            SendCommandLine("?: log mode <name> on|off");
+            return;
+        }
+        if (std::strcmp(mode, "on") == 0 || std::strcmp(mode, "vofa") == 0 ||
+            std::strcmp(mode, "off") == 0 || std::strcmp(mode, "color") == 0)
+        {
+            const bool on = std::strcmp(mode, "on") == 0 || std::strcmp(mode, "vofa") == 0;
+            SendCommandLine(SetDebugVofa(name, on)
                                 ? (on ? "log mode: vofa" : "log mode: color")
                                 : "log mode: not found");
         }
@@ -413,4 +448,7 @@ void Log::ProcessLogCommand(uint8_t* line)
         SendCommandLine("?: log list|on <name>|off|mode <name> on|off");
     }
 }
+
+REGISTER_SHELL_CMD("log", "log list|on|off|mode", Log::ProcessLogCommand, log);
+
 } // namespace debug

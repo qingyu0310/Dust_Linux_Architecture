@@ -11,8 +11,9 @@
 
 #include "Init_entry.hpp"
 #include "System_startup.hpp"
-#include "signal_handler.hpp"
-#include "framework/cmd/shell/log.hpp"
+#include "framework/init/signal_handler.hpp"
+#include "thread_registry.hpp"
+#include "framework/cmd/shell/log/log.hpp"
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
@@ -22,21 +23,22 @@
 // 链接脚本导出指针表边界；注册结构不直接按段内字节布局遍历。
 extern "C"
 {
-    extern const init::InitEntry* const __user_init_start[];
-    extern const init::InitEntry* const __user_init_end[];
+    extern const init::InitEntry*   const __user_init_start[];
+    extern const init::InitEntry*   const __user_init_end[];
     extern const init::ThreadEntry* const __user_thread_start[];
     extern const init::ThreadEntry* const __user_thread_end[];
 }
 
 namespace
 {
-std::vector<const init::InitEntry*> resources; // 成功初始化资源，按实际顺序登记
-std::vector<const init::ThreadEntry*> threads; // 已尝试启动线程，包含部分启动失败项
-std::atomic<bool> stop{false};                 // 主线程与业务线程共享停止请求
-std::atomic<int> status{0}; // 退出状态，非零错误不会被正常停止覆盖
+    
+std::vector<const init::InitEntry*> resources;     // 成功初始化资源，按实际顺序登记
+std::vector<const init::ThreadEntry*> threads;     // 已尝试启动线程，包含部分启动失败项
+std::atomic<bool> stop{false};                  // 主线程与业务线程共享停止请求
+std::atomic<int>  status{0};                    // 退出状态，非零错误不会被正常停止覆盖
 
-bool started = false; // 仅主线程访问，不支持重复启动
-void (*main_loop)() = nullptr; // 主线程事件回调，不持有具体业务对象
+bool started = false;                              // 仅主线程访问，不支持重复启动
+void (*main_loop)() = nullptr;                     // 主线程事件回调，不持有具体业务对象
 
 /**
  * @brief 同阶段初始化执行顺序，与子树保持 High → Mid → Low
@@ -70,6 +72,15 @@ void Cleanup(init::CleanupFunc function)
 } // namespace
 
 /**
+ * @brief 线程登记入口：Thread::Start 创建线程后调用
+ * @param thread 已创建的线程对象
+ */
+void init::RegisterThreadInstance(init::ThreadBase* thread)
+{
+    (void)thread_registry::Add(thread);
+}
+
+/**
  * @brief 提交停止请求并保存非零退出状态
  */
 void System_RequestStop(int exit_code)
@@ -79,6 +90,38 @@ void System_RequestStop(int exit_code)
         status.store(exit_code);
     }
     stop.store(true);
+}
+
+/**
+ * @brief 初始化阶段名（阶段横幅用）
+ */
+static const char* StageName(init::InitStage stage)
+{
+    switch (stage)
+    {
+        case init::InitStage::PreInit:   return "PreInit";
+        case init::InitStage::EarlyInit: return "EarlyInit";
+        case init::InitStage::MidInit:   return "MidInit";
+        case init::InitStage::LateInit:  return "LateInit";
+        case init::InitStage::AppInit:   return "AppInit";
+        default:                         return "?";
+    }
+}
+
+/**
+ * @brief 线程阶段名（阶段横幅用）
+ */
+static const char* StageName(init::ThreadStage stage)
+{
+    switch (stage)
+    {
+        case init::ThreadStage::PreThread:   return "PreThread";
+        case init::ThreadStage::EarlyThread: return "EarlyThread";
+        case init::ThreadStage::MidThread:   return "MidThread";
+        case init::ThreadStage::LateThread:  return "LateThread";
+        case init::ThreadStage::AppThread:   return "AppThread";
+        default:                             return "?";
+    }
 }
 
 /**
@@ -134,6 +177,9 @@ static bool RunStage(init::InitStage stage)
             }
         }
     }
+
+    // 阶段横幅：阶段内条目全部执行完再打印，表示哪个阶段初始化完成
+    DUST_LOG_OK("=====     [boot] %s ok     =====\n", StageName(stage));
     return true;
 }
 
@@ -176,6 +222,9 @@ static bool RunStage(init::ThreadStage stage)
             return false;
         }
     }
+
+    // 阶段横幅：线程阶段全部启动完再打印
+    DUST_LOG_OK("=====     [boot] %s ok     =====\n", StageName(stage));
     return true;
 }
 

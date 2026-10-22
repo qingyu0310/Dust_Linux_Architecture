@@ -11,7 +11,7 @@
 
 #include "hikrobot.hpp"
 #include "MvCameraControl.h"
-#include "framework/cmd/shell/log.hpp"
+#include "framework/cmd/shell/log/log.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>

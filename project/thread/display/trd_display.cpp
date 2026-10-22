@@ -10,9 +10,9 @@
  */
 
 #include "framework/cmd/config/config.hpp"
-#include "framework/cmd/shell/var.hpp"
-#include "framework/init/Init_entry.hpp"
-#include "framework/init/System_startup.hpp"
+#include "framework/cmd/shell/var/var.hpp"
+#include "framework/init/startup/Init_entry.hpp"
+#include "framework/init/startup/System_startup.hpp"
 #include "framework/topic/vision_to/vision_to.hpp"
 #include <chrono>
 #include <condition_variable>
