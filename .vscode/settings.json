@@ -1,0 +1,15 @@
+{
+	"cmake.sourceDirectory": "${workspaceFolder}",
+	"terminal.integrated.env.linux": {
+		"PATH": "${workspaceFolder}/framework/cmd/build:${env:PATH}"
+	},
+	
+	"workbench.tree.indent": 10,
+    "workbench.tree.renderIndentGuides": "always",
+    "explorer.compactFolders": false,
+    "explorer.enableUndo": false,
+
+    "workbench.colorCustomizations": {
+        "tree.indentGuidesStroke": "#00ff73"
+    },
+}
