@@ -1,5 +1,5 @@
 # 构建产物（dust build / CMake）
-build/
+project/build/
 
 # CMake 生成物（build/ 之外也可能出现）
 CMakeCache.txt

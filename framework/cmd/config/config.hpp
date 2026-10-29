@@ -22,7 +22,7 @@ namespace cmd::config
  * @brief YAML 参数读取对象
  *
  * 每个调用方加载自己的 YAML，类不持有全局参数或线程业务字段。
- * 相对路径优先以 DUST_CONFIG_ROOT 为根；未设置时退回可执行文件所在目录。
+ * 相对路径优先以 DUST_CONFIG_ROOT 为根；未设置时退回当前工作目录。
  * 加载与读取均在初始化阶段完成。
  */
 class Config final

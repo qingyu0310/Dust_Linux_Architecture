@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# dust CLI — 骨架工程命令分发。
+#
+# 用法：
+#   dust build [--clean] [--config <file>]   配置并构建
+#   dust run [--build]                       运行
+#   dust help                                打印本说明
+#
+# 本脚本只做分发，实际动作在 build.sh / run.sh。
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+    sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+    build) shift; exec "${HERE}/build.sh" "$@" ;;
+    run)   shift; exec "${HERE}/run.sh"   "$@" ;;
+    help|-h|--help|"") usage; exit 0 ;;
+    *)
+        echo "未知子命令: $1" >&2
+        usage >&2
+        exit 2 ;;
+esac

@@ -331,6 +331,12 @@ static init::Thread::TaskResult Task(void* context)
         return init::Thread::TaskResult::Continue;
     }
 
+    // 停止请求可能在 poll 阻塞期间到达：写 wake_fd 唤醒本拍，这里必须退出
+    if (thread_.StopRequested())
+    {
+        return init::Thread::TaskResult::Exit;
+    }
+
     if (state.input_open && (descriptors[0].revents & (POLLIN | POLLHUP)))
     {
         char buffer[256];

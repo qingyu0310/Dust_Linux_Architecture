@@ -34,3 +34,15 @@ config TRD_TEST
     help
       骨架自检线程：验证线程模板、日志、var 与注册段装配是否可用。
       不依赖任何外设。
+
+# ============================================================================
+
+# =================            TRD_ETHERCAT             ======================
+
+config TRD_ETHERCAT
+    bool "EtherCAT cyclic thread"
+    default y
+    select DUST_COM_ETHERCAT
+    help
+      EtherCAT 主站周期线程：每拍发一帧、收一帧，校验工作计数器。
+      需要系统已安装 SOEM，且从站接在主站网口的 PORTA。

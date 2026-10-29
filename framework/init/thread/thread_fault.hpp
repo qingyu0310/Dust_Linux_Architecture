@@ -37,15 +37,15 @@ enum class ThreadFaultPolicy : uint8_t
  */
 enum class RecoveryAction
 {
-    Restart,    // 恢复成功，重新执行任务入口
-    Stop        // 无法恢复，交给 DefaultHandle 按策略处置
+    Restart,    	// 恢复成功，重新执行任务入口
+    Stop        	// 无法恢复，交给 DefaultHandle 按策略处置
 };
 
 /**
  * @brief 异常恢复钩子：Task 抛异常或返回 Retry 时由线程自己就地处理
  *
  * Linux 版带异常与线程引用（父架构无异常，故为 bool(void*)）：
- * 业务需要按异常类型判可恢复性，或靠 Thread& 轮询 WaitForStop 重连。
+ * 业务需要按异常类型判可恢复性，或靠 Thread& 查询停止状态后重连。
  */
 using RetryHook = RecoveryAction (*)(const std::exception&, init::Thread&, void*);
 

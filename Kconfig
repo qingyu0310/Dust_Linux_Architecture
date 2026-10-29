@@ -13,6 +13,7 @@ source "framework/algorithm/Kconfig"
 source "framework/cmd/Kconfig"
 source "framework/shell/Kconfig"
 source "framework/modules/Kconfig"
+source "framework/drivers/Kconfig"
 source "framework/topic/Kconfig"
 source "project/Kconfig"
 

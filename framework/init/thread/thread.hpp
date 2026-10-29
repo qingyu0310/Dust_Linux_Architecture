@@ -151,8 +151,7 @@ public:
      * @param fault 故障配置（钩子 / 策略 / 保留标记），不传即全默认
      * @throws std::exception 入口无效、线程未回收或创建失败
      */
-    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr,
-               const ThreadFaultConfig& fault = {})
+    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr, const ThreadFaultConfig& fault = {})
     {
         if (entry == nullptr)
         {
@@ -219,16 +218,13 @@ public:
     }
 
     /**
-     * @brief 等待停止或超时，供业务线程替代不可中断 sleep
+     * @brief 休眠指定时长，让出 CPU
      *
-     * @param duration 最大等待时间
-     * @return true 收到停止请求；false 等待超时
+     * @param duration 休眠时长
      */
-    bool WaitForStop(std::chrono::milliseconds duration)
+    void Sleep(std::chrono::milliseconds duration)
     {
-        std::unique_lock<std::mutex> lock(stop_.mutex);
-
-        return stop_.condition.wait_for(lock, duration, [this] { return stop_.stop.load(); });
+        std::this_thread::sleep_for(duration);
     }
 
     /**
@@ -453,9 +449,7 @@ private:
         counters_.last_run_ns.store(ns);
 
         uint64_t longest = counters_.max_run_ns.load();
-        while (ns > longest && !counters_.max_run_ns.compare_exchange_weak(longest, ns))
-        {
-        }
+        while (ns > longest && !counters_.max_run_ns.compare_exchange_weak(longest, ns)) {}
     }
 
     /**
@@ -485,7 +479,6 @@ private:
 
                 const auto begin = std::chrono::steady_clock::now();
                 counters_.run_count.fetch_add(1);
-
                 TaskResult result = TaskResult::Continue;
                 try
                 {
@@ -532,8 +525,7 @@ private:
                     counters_.retry_count.fetch_add(1);
 
                     const std::runtime_error retry("task retry");
-                    if (fault_.retry == nullptr ||
-                        fault_.retry(retry, *this, task_.context) != RecoveryAction::Restart)
+                    if (fault_.retry == nullptr || fault_.retry(retry, *this, task_.context) != RecoveryAction::Restart)
                     {
                         if (StopRequested())
                         {
@@ -546,7 +538,7 @@ private:
 
                 if (task_.period.count() > 0)
                 {
-                    WaitForStop(task_.period);   // 周期等待；收到停止请求时下一轮退出
+                    Sleep(task_.period);
                 }
             }
         }

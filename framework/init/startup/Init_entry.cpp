@@ -55,9 +55,7 @@ static constexpr init::InitLevel kLevelOrder[] = {
  */
 uint64_t ElapsedNs(const std::chrono::steady_clock::time_point& begin)
 {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - begin).count());
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
 }
 
 /**
@@ -267,7 +265,7 @@ static bool StartupEntries()
     resources.reserve(__user_init_end - __user_init_start);
     threads.reserve(__user_thread_end - __user_thread_start);
 
-    if (!RunStage(init::InitStage::PreInit) || !RunStage(init::ThreadStage::PreThread))
+    if (!RunStage(init::InitStage::PreInit)   || !RunStage(init::ThreadStage::PreThread))
     {
         return false;
     }
@@ -275,15 +273,15 @@ static bool StartupEntries()
     {
         return false;
     }
-    if (!RunStage(init::InitStage::MidInit) || !RunStage(init::ThreadStage::MidThread))
+    if (!RunStage(init::InitStage::MidInit)   || !RunStage(init::ThreadStage::MidThread))
     {
         return false;
     }
-    if (!RunStage(init::InitStage::LateInit) || !RunStage(init::ThreadStage::LateThread))
+    if (!RunStage(init::InitStage::LateInit)  || !RunStage(init::ThreadStage::LateThread))
     {
         return false;
     }
-    return RunStage(init::InitStage::AppInit) && RunStage(init::ThreadStage::AppThread);
+    return RunStage(init::InitStage::AppInit) &&  RunStage(init::ThreadStage::AppThread);
 }
 
 /**

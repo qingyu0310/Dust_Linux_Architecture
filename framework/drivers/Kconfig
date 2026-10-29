@@ -1,0 +1,16 @@
+# drivers/Kconfig —— 底层通讯/设备驱动层。
+# 架构层能力默认 n，由业务层 select 拉起。
+#
+# 命名族（照父架构 framework/drivers/Kconfig，不许自创前缀）：
+#   DUST_COM_*  通讯驱动（UART / USB / RS485 / CAN / ETHERCAT）
+#   DUST_DEV_*  设备驱动（GPIO / PWM）
+#
+# 骨架阶段没有任何实现。新增驱动时在这里加 config，
+# 并在 CMakeLists.txt 里按同一个符号建 target。
+
+config DUST_COM_ETHERCAT
+    bool "EtherCAT master (SOEM)"
+    default n
+    help
+      用户态 EtherCAT 主站：打开网口、枚举从站、周期交换过程数据。
+      依赖系统已安装 SOEM（/usr/local/lib/libsoem.so）。

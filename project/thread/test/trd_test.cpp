@@ -19,7 +19,6 @@ namespace thread::test
 {
 
 static init::Thread thread_ {};         // 自检线程
-static float        t_ = 0.0f;          // 跨拍状态：受管任务每拍重新进入函数
 
 /**
  * @brief 任务单拍：推进仿真时间并输出一组双通道波形
@@ -33,12 +32,7 @@ static init::Thread::TaskResult Task(void* context)
 {
     (void)context;
 
-    t_ += 0.01f;
-
-    const float ch0 = std::sinh(t_);
-    const float ch1 = std::cosh(t_) * 2.0f;
-
-    DUST_LOG_DBG("test", "ch0=%f ch1=%f", static_cast<double>(ch0), static_cast<double>(ch1));
+    DUST_LOG_DBG("test", "ch0=%f ch1=%f", static_cast<double>(1), static_cast<double>(1));
 
     return init::Thread::TaskResult::Continue;
 }
@@ -61,8 +55,7 @@ bool thread_init()
  */
 bool thread_start()
 {
-    thread_.Start(Task, std::chrono::milliseconds(10), nullptr, "test",
-                  ThreadFaultConfig{nullptr, nullptr, ThreadFaultPolicy::Isolate});
+    thread_.Start(Task, std::chrono::milliseconds(10), nullptr, "test", ThreadFaultConfig{nullptr, nullptr, ThreadFaultPolicy::Isolate});
     return true;
 }
 

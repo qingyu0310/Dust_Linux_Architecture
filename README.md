@@ -148,8 +148,8 @@ modules 可使用 drivers；算法与业务线程不反向依赖 project
 | `framework/algorithm/vision/core/` | `DetectedArmor`、颜色/尺寸/标签枚举、几何校验和精修使用的灯条类型 |
 | `framework/algorithm/vision/detect/` | TensorRT 检测器、预处理/推理/后处理和模型类别映射 |
 | `framework/algorithm/vision/refine/` | 给定 YOLO 粗四点后的可选局部灯条提取与角点细化 |
-| `project/thread/CMakeLists.txt` | 业务线程源文件加入可执行程序，并把各线程 YAML 复制到可执行文件旁 |
-| `project/CMakeLists.txt` | 创建最终 `vision_app`，链接框架库并配置链接脚本/运行库路径 |
+| `project/thread/CMakeLists.txt` | 业务线程源文件加入可执行程序 |
+| `project/CMakeLists.txt` | 创建最终 `dust_app`，链接框架库并配置链接脚本/运行库路径 |
 | `framework/CMakeLists.txt` | 按 `CONFIG_*` 装配算法、topic、core 与 modules 各库 |
 | `framework/cmd/build/` | 构建与运行脚本（`dust`、`build.sh`、`run.sh`），见该目录 README |
 
@@ -187,7 +187,7 @@ build/kconfig/autoconf.h      #define CONFIG_X 1，强制 include 给所有编�
 
 CMake 侧只用结果：`include(kconfig.cmake)` 得到 `CONFIG_*`，`-include autoconf.h` 让 C++ 侧看见同一个符号。装配动作按层分工：
 
-- `project/thread/CMakeLists.txt`：`TRD_*` 决定哪些业务线程源文件进 `vision_app`；
+- `project/thread/CMakeLists.txt`：`TRD_*` 决定哪些业务线程源文件进 `dust_app`；
 - `framework/CMakeLists.txt`：`DUST_*` 决定 `framework_core` / `framework_vision` 的源文件与依赖；
 - `framework/modules/CMakeLists.txt`：`DUST_MOD_DEV_HIKROBOT` 决定是否查找 MVS SDK；
 - 根 `CMakeLists.txt`：`DUST_VISION_YOLO` 决定是否查找 CUDA/TensorRT 与 OpenCV dnn。
@@ -232,7 +232,7 @@ join: 等待工作线程彻底退出
 cleanup: 释放线程不再使用的模型、设备与缓存
 ```
 
-注册不是依赖静态构造函数调用一个全局 registry 的隐式魔法：宏把注册项指针放入专用链接段，启动器遍历链接脚本提供的段边界。这使组件声明分散在所属文件，同时启动顺序仍集中可控。新增注册源若没有进入 `vision_app` 或链接段未保留，注册项就不会运行，所以 CMake/链接配置是生命周期机制的一部分。
+注册不是依赖静态构造函数调用一个全局 registry 的隐式魔法：宏把注册项指针放入专用链接段，启动器遍历链接脚本提供的段边界。这使组件声明分散在所属文件，同时启动顺序仍集中可控。新增注册源若没有进入 `dust_app` 或链接段未保留，注册项就不会运行，所以 CMake/链接配置是生命周期机制的一部分。
 
 ## 如何在当前架构中开发
 
@@ -244,7 +244,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 4. **在线程层编排。** 在 `project/thread/` 读取本线程配置、订阅输入 topic、调用模块/算法、发布结果；始终定义停止和阻塞唤醒行为。
 5. **注册生命周期。** 新增初始化或线程时，使用现有注册机制，并在相应 CMake `target_sources` 中加入源文件。确认注册源直接进入最终可执行程序，避免静态库链接时被裁掉。
 6. **补构建期开关。** 架构能力写进所属层 `Kconfig`，业务线程写进 `project/Kconfig`；默认值保持与当前行为一致。
-7. **配置与验证。** 线程 YAML 放在所属线程目录，构建时复制到可执行文件旁；配置必须校验必需字段、类型和值域。为算法逻辑增加可重复的离线样例或测试，设备相关验证单独标明硬件前提。
+7. **配置与验证。** 线程 YAML 放在所属线程目录，程序以当前工作目录为基准读取；配置必须校验必需字段、类型和值域。为算法逻辑增加可重复的离线样例或测试，设备相关验证单独标明硬件前提。
 
 ### 以当前视觉链为例
 
@@ -254,7 +254,7 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 - 增加线程参数：放到对应线程 YAML，通过 `cmd::config::Config` 加载并验证；不要让算法模块自行到处读取 YAML。
 - 新增算法源文件：同时更新相关 `CMakeLists.txt`（并考虑是否需要新的 `CONFIG_*` 条件）。本项目不是靠扫描目录自动编译。
 
-开发新功能前建议先读：`project/thread/vision/trd_vision.cpp`（线程编排）、`framework/topic/vision_to/vision_to.hpp`（消息契约）、`framework/algorithm/vision/detect/armor_detector.hpp`（算法接口）和同目录 CMake 文件（构建接入）。
+开发新功能前建议先读：`project/thread/test/trd_test.cpp`（线程编排）、`framework/topic/channel.hpp`（消息契约）和同目录 CMake 文件（构建接入）。
 
 ### 按改动类型选择落点
 
@@ -287,8 +287,8 @@ cleanup: 释放线程不再使用的模型、设备与缓存
 
 ### YAML 配置接入流程
 
-1. 把配置放到拥有该功能的线程目录，如 `project/thread/vision/trd_vision.yaml`。
-2. 构建时该文件会被复制到可执行文件旁（`build/project/thread/<线程>/`），程序按“`DUST_CONFIG_ROOT` 指定的配置根，未设置时可执行文件目录”解析相对路径。
+1. 把配置放到拥有该功能的线程目录，如 `project/thread/ethercat/trd_ethercat.yaml`。
+2. 程序按“`DUST_CONFIG_ROOT` 指定的配置根，未设置时当前工作目录”解析相对路径；从仓库根运行即可找到 `project/thread/<线程>/<文件>.yaml`。
 3. 初始化时使用 `cmd::config::Config::Load(path, {必需字段...})`。当前 Config 会检查必需字段、未知字段和重复字段；读取 API 对类型和值域做验证。
 4. 将验证后的值拷贝到业务配置结构，再创建算法/模块。不要让处理每帧的热路径反复读 YAML。
 5. 配置注释写明单位、边界含义、是否重启生效和对行为/实时性的影响。
@@ -377,11 +377,11 @@ cmake -S . -B build
 cmake --build build --parallel
 ```
 
-配置阶段会先跑 Kconfig 前端，打印各符号结果，并生成 `build/kconfig/` 下的三份文件。也可以直接用仓库自带的脚本（`framework/cmd/build/`）：
+配置阶段会先跑 Kconfig 前端，打印各符号结果，并生成 `project/build/kconfig/` 下的三份文件。也可以直接用仓库自带的脚本（`framework/cmd/build/`）：
 
 ```bash
 ./framework/cmd/build/dust build     # 等价于上面的配置 + 构建
-./framework/cmd/build/dust run       # 运行 build/project/vision_app
+./framework/cmd/build/dust run       # 运行 project/build/project/dust_app
 
 # 或者把脚本目录加进 PATH，之后直接敲 dust
 export PATH="$PWD/framework/cmd/build:$PATH"
@@ -391,11 +391,10 @@ dust run
 
 ### 运行配置
 
-每个业务线程维护自己的 YAML，源文件在 `project/thread/<线程>/`。构建时它们会被复制到可执行文件旁（`build/project/thread/<线程>/`），因此直接运行即可加载；若要让程序改用别处的配置，设置 `DUST_CONFIG_ROOT` 指向包含 `thread/` 的配置根（源码树中可指向 `<repo>/project`），相对路径会以它为基准。视觉模型的 `engine_path` 写在 `trd_vision.yaml` 里，必须是能直接打开的路径，不由 CMake 生成或复制。
+每个业务线程维护自己的 YAML，源文件在 `project/thread/<线程>/`。程序以当前工作目录为基准解析相对路径，因此从仓库根运行即可直接加载；若要让程序改用别处的配置，设置 `DUST_CONFIG_ROOT` 指向包含 `project/` 的配置根，相对路径会以它为基准。
 
 ```bash
-./build/project/vision_app
-DUST_CONFIG_ROOT="$PWD/project" ./build/project/vision_app
+./project/build/project/dust_app
 ```
 
 运行需要可用的 MVS SDK、CUDA/TensorRT 动态库和海康相机；OpenCV 窗口显示需要图形桌面。
@@ -414,11 +413,10 @@ var set display.show 0
 | 现象 | 优先检查 |
 | --- | --- |
 | 配置阶段报 Kconfig 求值失败 | 报错会给出符号和出处；多半是依赖不满足却要求 `=y`，或符号名拼错 |
-| `CONFIG_*` 没生效 | 生成目录 `build/kconfig/` 是否更新；`build/CMakeCache.txt` 里是否有旧的 `KCONFIG_CONFIG` |
+| `CONFIG_*` 没生效 | 生成目录 `project/build/kconfig/` 是否更新；`project/build/CMakeCache.txt` 里是否有旧的 `KCONFIG_CONFIG` |
 | CMake 找不到 CUDA/TensorRT | `.venv/` 是否包含匹配的 Toolkit、TensorRT 头文件和 `nvinfer`；必要时设置 `DUST_DEPENDENCY_ROOT` / `CUDAToolkit_ROOT`；确认 `DUST_VISION_YOLO` 是否打开 |
 | 报告 TensorRT 版本不符 | 当前根工程要求 TensorRT 10.x，确认实际 include 和 library 来自同一安装 |
-| 找不到 engine | 看 `trd_vision.yaml` 的 `engine_path` 是否是可打开的路径（当前写成绝对路径） |
-| 报 `bad file ...thread/vision/trd_vision.yaml` | YAML 解析基准不对：确认构建（会复制 YAML）或设置 `DUST_CONFIG_ROOT` 指向含 `thread/` 的根 |
+| 报 `bad file ...thread/ethercat/trd_ethercat.yaml` | YAML 解析基准不对：确认在仓库根运行，或设置 `DUST_CONFIG_ROOT` 指向含 `project/` 的根 |
 | 找不到 MVS 或运行时加载失败 | 检查 `HIKROBOT_MVS_ROOT`、SDK 的库和 USB3 transport 组件，以及动态库搜索路径 |
 | 新增源文件后符号未链接 | 检查对应 `target_sources()` / `add_library()`，以及该源文件所在功能的 `CONFIG_*` 是否为 `y` |
 | 注册的初始化/线程没有执行 | 注册源是否进入最终可执行文件，链接脚本是否保留注册段，注册函数是否符合回调签名 |

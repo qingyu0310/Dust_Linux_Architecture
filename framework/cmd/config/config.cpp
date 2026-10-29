@@ -22,12 +22,11 @@ namespace cmd::config
 /**
  * @brief 加载调用方指定 YAML，校验根节点和字段集合
  *
- * 相对路径优先以 DUST_CONFIG_ROOT 为根，否则以 /proc/self/exe 对应程序所在目录为基准。
- * 两种方式都不依赖当前工作目录。
+ * 相对路径优先以 DUST_CONFIG_ROOT 为根，否则以当前工作目录为根。
  * required 是调用方声明的必需字段，optional 是允许但可以省略的字段；拒绝未知与重复字段。
  * 加载失败清空当前节点，避免继续读取上一次加载的数据。
  *
- * @param path YAML 路径，可为绝对路径或程序旁的相对路径
+ * @param path YAML 路径，可为绝对路径或工作目录下的相对路径
  * @param required 调用方所需的必需字段名
  * @param optional 调用方允许但可以省略的字段名
  * @throws std::exception 文件无法读取、YAML 格式或字段不符合要求
@@ -59,7 +58,7 @@ void Config::Load(const char* path, std::initializer_list<const char*> required,
         }
         else
         {
-            root_ = std::filesystem::read_symlink("/proc/self/exe").parent_path().lexically_normal().string();
+            root_ = std::filesystem::current_path().lexically_normal().string();
             file = std::filesystem::path(root_) / file;
         }
     }

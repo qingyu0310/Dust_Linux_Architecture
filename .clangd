@@ -1,2 +1,44 @@
+# 仓库根 clangd 配置
+# 让 framework/ 各子层也能用 build/ 的编译数据库
 CompileFlags:
-  CompilationDatabase: build
+  CompilationDatabase: /home/rmconstruction/Desktop/qingyu/project/build
+  Add:
+    - -ferror-limit=0
+    - -Wno-unused-variable
+    - "-Wno-#pragma-messages"
+    - -isystem
+    - /usr/include/c++/11
+    - -isystem
+    - /usr/include/x86_64-linux-gnu/c++/11
+    - -isystem
+    - /usr/include/c++/11/backward
+    - -isystem
+    - /usr/lib/gcc/x86_64-linux-gnu/11/include
+    - -isystem
+    - /usr/local/include
+    - -isystem
+    - /usr/include/x86_64-linux-gnu
+    - -isystem
+    - /usr/include
+  Remove:
+    - -mabi=*
+    - -march=*
+    - -mcpu=*
+    - -mfp16-format=*
+    - --specs=*
+    - -fno-printf-return-value
+    - --param=*
+    - -fmacro-prefix-map=*
+    - -fno-reorder-functions
+    - -ftls-model=*
+    - -mno-relax
+
+Diagnostics:
+  Suppress:
+    - drv_unknown_argument
+    - unknown_warning_option
+    - unused_variable
+    - no_member
+    - "#pragma_messages"
+    - anon_bitfield_qualifiers
+    - -Wint-to-pointer-cast

@@ -7,6 +7,11 @@
 # ============================================================================
 
 if(CONFIG_TRD_TEST)
-    target_sources(vision_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/trd_test.cpp)
-    target_include_directories(vision_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_sources(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/trd_test.cpp)
+    target_include_directories(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
+endif()
+
+if(CONFIG_TRD_ETHERCAT)
+    target_sources(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ethercat/trd_ethercat.cpp)
+    target_include_directories(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ethercat)
 endif()
