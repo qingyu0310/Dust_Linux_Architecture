@@ -1,8 +1,8 @@
 # 构建产物（dust build / CMake / colcon）
 build/
 install/
-log/
-logs/
+/log/
+/logs/
 Testing/
 CMakeCache.txt
 CMakeFiles/

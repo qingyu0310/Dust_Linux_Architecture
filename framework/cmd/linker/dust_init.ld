@@ -1,9 +1,9 @@
 /**
  * @file dust_init.ld
  * @author qingyu
- * @brief ELF 注册指针表：保留初始化、线程与 shell 命令段，导出遍历边界
- * @version 0.2
- * @date 2026-10-22
+ * @brief ELF 注册指针表：保留初始化、线程、shell 命令与启动耗时段，导出遍历边界
+ * @version 0.3
+ * @date 2026-10-29
  *
  * @copyright Copyright (c) 2026
  *
@@ -34,6 +34,12 @@ SECTIONS
         __start_shell_cmd = .;
         KEEP(*(shell_cmd))
         __stop_shell_cmd = .;
+    }
+    .boot_timing : ALIGN(8)
+    {
+        __boot_timing_start = .;
+        KEEP(*(.boot_timing))
+        __boot_timing_end = .;
     }
 }
 /* 补充默认 Linux 链接布局，不替换系统的完整链接脚本。 */

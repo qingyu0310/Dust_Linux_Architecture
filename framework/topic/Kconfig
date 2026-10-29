@@ -1,14 +1,5 @@
 # topic/Kconfig —— 线程间数据通道契约。
 # 架构层能力默认 n，由业务层 select 拉起。
-
-config DUST_TPC_CAMERA_TO
-    bool "camera frame channel"
-    default n
-    help
-      Single-slot camera frame channel (topic/camera_to).
-
-config DUST_TPC_VISION_TO
-    bool "vision result channel"
-    default n
-    help
-      Single-slot vision result channel (topic/vision_to).
+#
+# 骨架阶段只有通用通道模板（topic/channel.hpp），没有具体消息契约。
+# 新增契约时照 DUST_TPC_XXX_TO 命名，并在 topic/<name>/ 下定义 Message。

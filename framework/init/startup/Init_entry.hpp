@@ -1,15 +1,18 @@
 /**
  * @file Init_entry.hpp
  * @author qingyu
- * @brief 初始化与线程注册项：阶段、优先级、失败策略和清理回调
- * @version 0.1
- * @date 2026-10-12
+ * @brief 初始化与线程注册项：阶段、优先级、失败策略、清理回调与启动耗时槽
+ * @version 0.2
+ * @date 2026-10-29
  *
  * @copyright Copyright (c) 2026
  *
  */
 
 #pragma once
+
+#include <cstdint>
+#include "boot_timing.hpp"
 
 namespace init
 {
@@ -73,12 +76,13 @@ enum class InitFailPolicy
  */
 struct InitEntry
 {
-    InitFunc function;   // 初始化函数，返回成功状态
-    CleanupFunc cleanup; // 部分初始化失败与退出时的资源释放
-    InitStage stage;     // 所属初始化阶段
-    InitLevel level;     // 同阶段初始化优先级：High → Mid → Low
-    InitFailPolicy fail; // 初始化失败后的处理策略
-    const char* name;    // 日志中的组件标识
+    InitFunc        function;   // 初始化函数，返回成功状态
+    CleanupFunc     cleanup;    // 部分初始化失败与退出时的资源释放
+    BootTimingSlot* timing;     // 本项耗时槽（.boot_timing 段）
+    InitStage       stage;      // 所属初始化阶段
+    InitLevel       level;      // 同阶段初始化优先级：High → Mid → Low
+    InitFailPolicy  fail;       // 初始化失败后的处理策略
+    const char*     name;       // 日志中的组件标识
 };
 
 /**
@@ -86,11 +90,12 @@ struct InitEntry
  */
 struct ThreadEntry
 {
-    InitFunc start;           // 创建线程后立即返回
-    CleanupFunc request_stop; // 通知停止并解除阻塞
-    CleanupFunc join;         // 等待线程退出
-    ThreadStage stage;        // 所属线程启动阶段
-    const char* name;         // 日志中的组件标识
+    InitFunc        start;        // 创建线程后立即返回
+    CleanupFunc     request_stop; // 通知停止并解除阻塞
+    CleanupFunc     join;         // 等待线程退出
+    BootTimingSlot* timing;       // 本项耗时槽（.boot_timing 段）
+    ThreadStage     stage;        // 所属线程启动阶段
+    const char*     name;         // 日志中的组件标识
 };
 } // namespace init
 
@@ -109,8 +114,11 @@ struct ThreadEntry
  * @param name_ 组件名称，用于启动日志
  */
 #define REGISTER_INIT(fn, stage_, level_, fail_, cleanup_, name_)                                  \
+    static BootTimingSlot DUST_JOIN(dust_timing_, fn)                                              \
+        __attribute__((used, section(".boot_timing"), aligned(8))) = { name_, 0, false };          \
     static const init::InitEntry DUST_JOIN(dust_init_, fn){fn,                                     \
                                                            cleanup_,                               \
+                                                           &DUST_JOIN(dust_timing_, fn),           \
                                                            init::InitStage::stage_,                \
                                                            init::InitLevel::level_,                \
                                                            init::InitFailPolicy::fail_,            \
@@ -129,7 +137,10 @@ struct ThreadEntry
  * @param name_ 线程名称，用于启动日志
  */
 #define REGISTER_THREAD(fn, stage_, stop_, join_, name_)                                           \
+    static BootTimingSlot DUST_JOIN(dust_timing_, fn)                                              \
+        __attribute__((used, section(".boot_timing"), aligned(8))) = { name_, 0, false };          \
     static const init::ThreadEntry DUST_JOIN(dust_thread_, fn){fn, stop_, join_,                   \
+                                                               &DUST_JOIN(dust_timing_, fn),       \
                                                                init::ThreadStage::stage_, name_};  \
     static const init::ThreadEntry* const DUST_JOIN(dust_thread_ptr_, fn)                          \
         __attribute__((used, section(".user_thread"), aligned(sizeof(void*)))) =                   \

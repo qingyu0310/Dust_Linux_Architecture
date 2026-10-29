@@ -14,10 +14,21 @@
 
 add_executable(vision_app ${PROJECT_SOURCE_DIR}/framework/init/startup/main.cpp)
 
+# 带 REGISTER_SHELL_CMD 的源必须直接进可执行程序：静态库里没人引用的对象
+# 会被链接器整份丢弃，注册项就进不了 .shell_cmd 段。
 if(CONFIG_DUST_CMD_SHELL)
     target_sources(vision_app PRIVATE
-        ${PROJECT_SOURCE_DIR}/framework/cmd/shell/shell.cpp
-        ${PROJECT_SOURCE_DIR}/framework/cmd/shell/thread/thread_cmd.cpp)
+        ${PROJECT_SOURCE_DIR}/framework/shell/shell.cpp
+        ${PROJECT_SOURCE_DIR}/framework/shell/boot/boot_cmd.cpp
+        ${PROJECT_SOURCE_DIR}/framework/shell/thread/thread_cmd.cpp)
+endif()
+
+if(CONFIG_DUST_CMD_SHELL_VAR)
+    target_sources(vision_app PRIVATE ${PROJECT_SOURCE_DIR}/framework/shell/var/var.cpp)
+endif()
+
+if(CONFIG_DUST_CMD_SHELL_LOG)
+    target_sources(vision_app PRIVATE ${PROJECT_SOURCE_DIR}/framework/shell/log/cmd/log_cmd.cpp)
 endif()
 
 # 业务线程：各线程按自己的 Kconfig 开关装配
@@ -31,34 +42,6 @@ add_subdirectory(thread)
 
 target_link_libraries(vision_app PRIVATE
     framework_core framework_algorithm framework_topic)
-
-if(CONFIG_DUST_MOD_DEV_HIKROBOT)
-    target_link_libraries(vision_app PRIVATE framework_modules)
-endif()
-
-if(CONFIG_DUST_VISION_CORE OR CONFIG_DUST_VISION_POSE)
-    target_link_libraries(vision_app PRIVATE framework_vision)
-    target_link_libraries(vision_app PRIVATE Eigen3::Eigen)
-endif()
-
-if(CONFIG_DUST_CALIB)
-    target_link_libraries(vision_app PRIVATE framework_calib)
-endif()
-
-# ============================================================================
-#
-# 运行库路径：MVS 与 CUDA/TensorRT 都从各自 SDK 目录解析
-#
-# ============================================================================
-
-get_filename_component(_hikrobot_runtime_dir "${HIKROBOT_LIBRARY}" DIRECTORY)
-set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH "${_hikrobot_runtime_dir}")
-
-if(CONFIG_DUST_VISION_DETECT)
-    get_filename_component(_tensorrt_runtime_dir "${TensorRT_LIBRARY}" DIRECTORY)
-    set_property(TARGET vision_app APPEND PROPERTY BUILD_RPATH
-        "${_tensorrt_runtime_dir}" "${CUDAToolkit_LIBRARY_DIR}")
-endif()
 
 # ============================================================================
 #

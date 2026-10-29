@@ -1,9 +1,9 @@
 /**
  * @file Init_entry.cpp
  * @author qingyu
- * @brief 统一启动实现：注册表遍历、停止请求和逆序资源清理
- * @version 0.1
- * @date 2026-10-12
+ * @brief 统一启动实现：注册表遍历、启动耗时记录、停止请求和逆序资源清理
+ * @version 0.2
+ * @date 2026-10-29
  *
  * @copyright Copyright (c) 2026
  *
@@ -13,7 +13,8 @@
 #include "System_startup.hpp"
 #include "framework/init/signal_handler.hpp"
 #include "thread_registry.hpp"
-#include "framework/cmd/shell/log/log.hpp"
+#include "boot_timing.hpp"
+#include "framework/shell/log/log.hpp"
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
@@ -50,6 +51,16 @@ static constexpr init::InitLevel kLevelOrder[] = {
 };
 
 /**
+ * @brief 从起点到现在的纳秒数，供启动耗时槽使用
+ */
+uint64_t ElapsedNs(const std::chrono::steady_clock::time_point& begin)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - begin).count());
+}
+
+/**
  * @brief 执行清理回调；异常转为退出错误，继续清理其他资源
  */
 void Cleanup(init::CleanupFunc function)
@@ -78,6 +89,15 @@ void Cleanup(init::CleanupFunc function)
 void init::RegisterThreadInstance(init::ThreadBase* thread)
 {
     (void)thread_registry::Add(thread);
+}
+
+/**
+ * @brief 线程注销入口：Run 收尾时调用
+ * @param thread 即将退出的线程对象
+ */
+void init::UnregisterThreadInstance(init::ThreadBase* thread)
+{
+    (void)thread_registry::Remove(thread);
 }
 
 /**
@@ -148,6 +168,8 @@ static bool RunStage(init::InitStage stage)
             }
 
             DUST_LOG_INF("[boot] %s init", entry->name);
+
+            const auto begin = std::chrono::steady_clock::now();
             bool success = false;
             try
             {
@@ -161,6 +183,7 @@ static bool RunStage(init::InitStage stage)
             {
                 success = false;
             }
+            BootTiming::Record(entry->timing, ElapsedNs(begin), success);
 
             if (success)
             {
@@ -206,6 +229,8 @@ static bool RunStage(init::ThreadStage stage)
 
         DUST_LOG_OK("[boot] %s start", entry->name);
         threads.push_back(entry); // 覆盖线程部分启动失败后的清理。
+
+        const auto begin = std::chrono::steady_clock::now();
         bool success = false;
         try
         {
@@ -215,6 +240,7 @@ static bool RunStage(init::ThreadStage stage)
         {
             success = false;
         }
+        BootTiming::Record(entry->timing, ElapsedNs(begin), success);
 
         if (!success)
         {

@@ -58,68 +58,18 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc)
-
-if(CONFIG_DUST_VISION_DETECT)
-    find_package(OpenCV REQUIRED COMPONENTS dnn)
-endif()
-
-if(CONFIG_DUST_CALIB OR CONFIG_DUST_VISION_POSE)
-    find_package(OpenCV REQUIRED COMPONENTS calib3d imgcodecs)
-endif()
 
 # ============================================================================
 #
-# 视觉依赖（CONFIG_DUST_VISION_DETECT）：CUDA / TensorRT
+# 视觉依赖（CONFIG_DUST_VISION_DETECT）：OpenCV / CUDA / TensorRT
+#
+# 骨架阶段没有视觉业务，相关符号在 framework/algorithm/Kconfig 中已移除，
+# 这里整段不再触发。新增视觉能力时把对应 find_package 段加回来。
 #
 # ============================================================================
 
 if(CONFIG_DUST_VISION_DETECT)
-    set(DUST_DEPENDENCY_ROOT "${PROJECT_SOURCE_DIR}/.venv" CACHE PATH
-        "Root of the project-local CUDA and TensorRT environment")
-    if(NOT DEFINED CUDAToolkit_ROOT)
-        set(CUDAToolkit_ROOT "${DUST_DEPENDENCY_ROOT}" CACHE PATH "CUDA Toolkit root")
-    endif()
-    find_package(CUDAToolkit 12 REQUIRED)
-
-    set(TensorRT_ROOT "${DUST_DEPENDENCY_ROOT}" CACHE PATH "TensorRT installation root")
-    find_path(TensorRT_INCLUDE_DIR
-        NAMES NvInfer.h
-        HINTS "${TensorRT_ROOT}/include"
-        REQUIRED)
-    find_library(TensorRT_LIBRARY
-        NAMES nvinfer
-        HINTS "${TensorRT_ROOT}/lib" "${TensorRT_ROOT}/lib64"
-        REQUIRED)
-
-    set(_tensorrt_version_header "${TensorRT_INCLUDE_DIR}/NvInferVersion.h")
-    if(NOT EXISTS "${_tensorrt_version_header}")
-        message(FATAL_ERROR "TensorRT version header not found: ${_tensorrt_version_header}")
-    endif()
-    file(STRINGS "${_tensorrt_version_header}" _tensorrt_major_line
-        REGEX "^#define (NV_TENSORRT_MAJOR|TRT_MAJOR_ENTERPRISE) [0-9]+")
-    file(STRINGS "${_tensorrt_version_header}" _tensorrt_minor_line
-        REGEX "^#define (NV_TENSORRT_MINOR|TRT_MINOR_ENTERPRISE) [0-9]+")
-    file(STRINGS "${_tensorrt_version_header}" _tensorrt_patch_line
-        REGEX "^#define (NV_TENSORRT_PATCH|TRT_PATCH_ENTERPRISE) [0-9]+")
-    string(REGEX MATCH "[0-9]+$" TensorRT_VERSION_MAJOR "${_tensorrt_major_line}")
-    string(REGEX MATCH "[0-9]+$" TensorRT_VERSION_MINOR "${_tensorrt_minor_line}")
-    string(REGEX MATCH "[0-9]+$" TensorRT_VERSION_PATCH "${_tensorrt_patch_line}")
-    if(NOT TensorRT_VERSION_MAJOR STREQUAL "10")
-        message(FATAL_ERROR
-            "TensorRT 10.x is required, found ${TensorRT_VERSION_MAJOR}.${TensorRT_VERSION_MINOR}.${TensorRT_VERSION_PATCH}")
-    endif()
-
-    add_library(TensorRT::nvinfer SHARED IMPORTED GLOBAL)
-    set_target_properties(TensorRT::nvinfer PROPERTIES
-        IMPORTED_LOCATION "${TensorRT_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${TensorRT_INCLUDE_DIR}")
-
-    message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION} (${CUDAToolkit_ROOT})")
-    message(STATUS
-        "TensorRT: ${TensorRT_VERSION_MAJOR}.${TensorRT_VERSION_MINOR}.${TensorRT_VERSION_PATCH}; include=${TensorRT_INCLUDE_DIR}; library=${TensorRT_LIBRARY}")
-else()
-    message(STATUS "CONFIG_DUST_VISION_DETECT=OFF: CUDA/TensorRT discovery is disabled")
+    message(FATAL_ERROR "Dust vision capability is not part of the Linux skeleton")
 endif()
 
 # ============================================================================

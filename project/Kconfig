@@ -2,16 +2,8 @@
 # 业务门禁符号（TRD_ / USE_）保持原名，不加 DUST_ 前缀
 # 业务门禁 select 的架构符号统一 DUST_ 前缀
 #
-# 分区按数据流排列，自上而下就是帧的流向：
-#
-#   TRD_CAMERA   相机线程   打开设备并连续采集           发布 camera_to
-#   TRD_CALIB    标定线程   订阅 camera_to、画圆心       发布 vision_to
-#   TRD_VISION   识别线程   订阅 camera_to、跑检测       发布 vision_to
-#   TRD_DISPLAY  显示线程   订阅 vision_to               开窗口显示
-#
-# 标定与识别是并列的两个消费者，但互斥：两者都往 vision_to 发，同时开会互相覆盖，
-# 所以各自 depends on 对方的取反。TRD_DISPLAY 由「标定或识别」任一个拉起。
-# 使用开关与测试开关不参与数据流，分别放在最前和最后。
+# 骨架工程不含任何具体业务：只有调试台与 test 线程。
+# test 线程是六模块装配的最小可验证单元（线程模板 + 日志 + var + 注册段）。
 
 # ============================================================================
 
@@ -34,73 +26,11 @@ config USE_CMD_CONFIG
 
 # ============================================================================
 
-# =================              TRD_CAMERA              ====================
-
-config TRD_CAMERA
-    bool "Camera thread"
-    default y
-    select DUST_MOD_DEV_HIKROBOT
-    select DUST_TPC_CAMERA_TO
-    help
-      海康相机采集线程：打开设备、连续取帧并发布到 camera_to。
-      标定与识别都从这条通道取帧，是整个视觉链的帧源。
-
-# ============================================================================
-
-# =================               TRD_CALIB              ====================
-
-config TRD_CALIB
-    bool "Camera intrinsic calibration thread"
-    default n
-    depends on TRD_CAMERA && !TRD_VISION
-    select DUST_CALIB
-    select DUST_TPC_CAMERA_TO
-    select DUST_TPC_VISION_TO
-    help
-      启动期内参标定线程：订阅 camera_to，把认出来的圆心画在帧上转发到
-      vision_to，按 shell 快门保留合格样本，收满后解出内参并逐行打印。
-      与 TRD_VISION 互斥——两者都往 vision_to 发，同时开会互相覆盖。
-
-# ============================================================================
-
-# =================              TRD_VISION              ====================
-
-config TRD_VISION
-    bool "Vision detection thread"
-    default y
-    depends on TRD_CAMERA && !TRD_CALIB
-    select DUST_VISION_DETECT
-    select DUST_VISION_POSE
-    select DUST_VISION_TRACK
-    select DUST_VISION_MULTI_TRACK
-    select DUST_TPC_CAMERA_TO
-    select DUST_TPC_VISION_TO
-    help
-      0526 装甲板识别线程：订阅 camera_to 跑 TensorRT 检测，
-      把同帧图像与识别结果发布到 vision_to。帧来自 TRD_CAMERA。
-      与 TRD_CALIB 互斥。
-
-# ============================================================================
-
-# =================             TRD_DISPLAY              ====================
-
-config TRD_DISPLAY
-    bool "Vision display thread"
-    depends on (TRD_VISION || TRD_CALIB)
-    default y
-    select DUST_TPC_CAMERA_TO
-    select DUST_TPC_VISION_TO
-    help
-      显示线程：订阅 vision_to 并把收到的帧原样显示。
-      叠加内容由发布方画好，显示侧不做图像处理。
-
-# ============================================================================
-
 # =================               TRD_TEST               ====================
 
 config TRD_TEST
     bool "User test thread"
-    default n
-    select DUST_VISION_MULTI_TRACK
+    default y
     help
-      临时测试开关：当前跑多目标跟踪的合成自检。
+      骨架自检线程：验证线程模板、日志、var 与注册段装配是否可用。
+      不依赖任何外设。

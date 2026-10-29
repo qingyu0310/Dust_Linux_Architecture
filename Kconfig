@@ -1,16 +1,17 @@
-# Linux vision project Kconfig entry point.
+# Linux skeleton Kconfig entry point.
 # Business symbols keep the Dust naming convention: TRD_*.
 
-mainmenu "Dust Linux Vision"
+mainmenu "Dust Linux Skeleton"
 
 config PRJ_MAIN
-    bool "Main vision application"
+    bool "Main application"
     default y
 
 if PRJ_MAIN
 
 source "framework/algorithm/Kconfig"
 source "framework/cmd/Kconfig"
+source "framework/shell/Kconfig"
 source "framework/modules/Kconfig"
 source "framework/topic/Kconfig"
 source "project/Kconfig"

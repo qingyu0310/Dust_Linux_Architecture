@@ -1,0 +1,25 @@
+# shell/Kconfig —— 调试台底座与子命令族（boot / log / var / thread）。
+# 架构层能力默认 n，由业务层 select 拉起。
+
+config DUST_CMD_SHELL
+    bool "Self-maintained debug console (thread + command dispatch)"
+    default n
+    help
+        Console thread: line input, command dispatch and log transport.
+        var/log sub-commands are gated by their own symbols.
+
+config DUST_CMD_SHELL_LOG
+    bool "log system + log sub-commands (log list/on/off)"
+    default n
+    select DUST_CMD_SHELL
+    help
+        Self-made log system: INF/ERR/OK/WRN with colour, DBG selectable
+        streaming via log on/off. Requires the shell thread.
+
+config DUST_CMD_SHELL_VAR
+    bool "var sub-commands (var list/get/set)"
+    default n
+    select DUST_CMD_SHELL
+    help
+        Debug variable interaction: var list / get <name> / set <name> <v>.
+        Threads register variables via REGISTER_SHELL_VAR().

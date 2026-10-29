@@ -1,25 +1,7 @@
-# cmd/Kconfig —— 控制台线程、日志系统、调试变量与运行配置读取。
+# cmd/Kconfig —— 横切辅助能力（当前只有运行配置读取）。
 # 架构层能力默认 n，由业务层 select 拉起。
-
-config DUST_CMD_SHELL
-    bool "UART debug console (thread + command dispatch)"
-    default n
-    help
-      Console thread: UART receive loop and command dispatch.
-
-config DUST_CMD_SHELL_LOG
-    bool "log system + log sub-commands"
-    default n
-    select DUST_CMD_SHELL
-    help
-      DUST_LOG system and log sub-commands (log list/on/off).
-
-config DUST_CMD_SHELL_VAR
-    bool "var sub-commands (var list/get/set)"
-    default n
-    select DUST_CMD_SHELL
-    help
-      Debug variable registration and var sub-commands.
+#
+# 调试台与日志归 framework/shell/，不在本文件。
 
 config DUST_CMD_CONFIG
     bool "YAML runtime config loader"

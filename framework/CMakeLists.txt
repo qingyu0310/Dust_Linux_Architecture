@@ -11,58 +11,13 @@ find_package(yaml-cpp REQUIRED)
 
 # ============================================================================
 #
-# algorithm：算法能力（纯头文件能力 + 视觉、标定静态库）
+# algorithm：算法能力（纯头文件能力）
 #
 # ============================================================================
 
 add_library(framework_algorithm INTERFACE)
 target_include_directories(framework_algorithm INTERFACE ${PROJECT_SOURCE_DIR})
 target_link_libraries(framework_algorithm INTERFACE Eigen3::Eigen)
-
-if(CONFIG_DUST_VISION_CORE OR CONFIG_DUST_VISION_POSE)
-    add_library(framework_vision STATIC)
-    if(CONFIG_DUST_VISION_CORE)
-        target_sources(framework_vision PRIVATE
-            algorithm/vision/core/detections.cpp
-            algorithm/vision/core/light_bar.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_MODEL)
-        target_sources(framework_vision PRIVATE algorithm/vision/detect/model_decode.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_DETECT)
-        target_sources(framework_vision PRIVATE algorithm/vision/detect/armor_detector.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_YOLO_REFINER)
-        target_sources(framework_vision PRIVATE algorithm/vision/refine/armor_refiner.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_POSE)
-        target_sources(framework_vision PRIVATE algorithm/vision/pose/armor_pose.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_TRACK)
-        target_sources(framework_vision PRIVATE algorithm/vision/track/armor_tracker.cpp)
-    endif()
-    if(CONFIG_DUST_VISION_MULTI_TRACK)
-        target_sources(framework_vision PRIVATE algorithm/vision/track/multi_target.cpp)
-    endif()
-    target_include_directories(framework_vision PUBLIC ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(framework_vision PUBLIC opencv_core opencv_imgproc)
-    if(CONFIG_DUST_VISION_DETECT)
-        target_link_libraries(framework_vision PUBLIC opencv_dnn PRIVATE CUDA::cudart TensorRT::nvinfer)
-    endif()
-    if(CONFIG_DUST_VISION_POSE)
-        target_link_libraries(framework_vision PUBLIC opencv_calib3d)
-    endif()
-    target_link_libraries(framework_vision PUBLIC Eigen3::Eigen)
-    target_compile_options(framework_vision PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-if(CONFIG_DUST_CALIB)
-    add_library(framework_calib STATIC
-        algorithm/calib/camera_calib.cpp)
-    target_include_directories(framework_calib PUBLIC ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(framework_calib PUBLIC opencv_core opencv_calib3d)
-    target_compile_options(framework_calib PRIVATE -Wall -Wextra -Wpedantic)
-endif()
 
 # ============================================================================
 #
@@ -71,8 +26,7 @@ endif()
 # ============================================================================
 
 add_library(framework_topic INTERFACE)
-target_include_directories(framework_topic INTERFACE ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(framework_topic INTERFACE ${OpenCV_LIBS})
+target_include_directories(framework_topic INTERFACE ${PROJECT_SOURCE_DIR})
 
 # ============================================================================
 #
@@ -82,13 +36,9 @@ target_link_libraries(framework_topic INTERFACE ${OpenCV_LIBS})
 
 add_library(framework_core STATIC
     init/startup/Init_entry.cpp
-    init/signal_handler.cpp)
-if(CONFIG_DUST_CMD_SHELL_LOG)
-    target_sources(framework_core PRIVATE cmd/shell/log/log.cpp cmd/shell/log/log_transport.cpp)
-endif()
-if(CONFIG_DUST_CMD_SHELL_VAR)
-    target_sources(framework_core PRIVATE cmd/shell/var/var.cpp)
-endif()
+    init/startup/boot_timing.cpp
+    init/signal_handler.cpp
+    init/thread/thread_fault.cpp)
 if(CONFIG_DUST_CMD_CONFIG)
     target_sources(framework_core PRIVATE cmd/config/config.cpp)
 endif()
@@ -96,17 +46,21 @@ endif()
 target_include_directories(framework_core PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/init/startup
-    ${CMAKE_CURRENT_SOURCE_DIR}/init/thread
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/log
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/var
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmd/shell/thread)
+    ${CMAKE_CURRENT_SOURCE_DIR}/init/thread)
 target_link_libraries(framework_core PUBLIC Threads::Threads yaml-cpp)
 target_compile_options(framework_core PRIVATE -Wall -Wextra -Wpedantic)
 
 # ============================================================================
 #
-# modules：设备模块能力
+# shell：调试台底座 + 子命令族（boot / log / var / thread）
+#
+# ============================================================================
+
+add_subdirectory(shell)
+
+# ============================================================================
+#
+# modules：设备模块能力（骨架无设备模块，保留空装配位）
 #
 # ============================================================================
 

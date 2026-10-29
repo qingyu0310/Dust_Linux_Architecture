@@ -151,7 +151,7 @@ modules 可使用 drivers；算法与业务线程不反向依赖 project
 | `project/thread/CMakeLists.txt` | 业务线程源文件加入可执行程序，并把各线程 YAML 复制到可执行文件旁 |
 | `project/CMakeLists.txt` | 创建最终 `vision_app`，链接框架库并配置链接脚本/运行库路径 |
 | `framework/CMakeLists.txt` | 按 `CONFIG_*` 装配算法、topic、core 与 modules 各库 |
-| `framework/cmd/build/` | 构建与运行脚本（`dust`、`build.sh`、`run.sh`） |
+| `framework/cmd/build/` | 构建与运行脚本（`dust`、`build.sh`、`run.sh`），见该目录 README |
 
 `framework/` 和 `project/` 的依赖方向原则上是：**基础设施/算法供业务线程使用，而不是反过来依赖业务线程**。例如 `ArmorDetector` 不应 include `trd_vision.cpp`；相机模块不应知道 `vision_to`；线程负责把独立模块连接起来。
 
@@ -380,8 +380,13 @@ cmake --build build --parallel
 配置阶段会先跑 Kconfig 前端，打印各符号结果，并生成 `build/kconfig/` 下的三份文件。也可以直接用仓库自带的脚本（`framework/cmd/build/`）：
 
 ```bash
-dust build        # 等价于上面的配置 + 构建
-dust run          # 运行 build/project/vision_app
+./framework/cmd/build/dust build     # 等价于上面的配置 + 构建
+./framework/cmd/build/dust run       # 运行 build/project/vision_app
+
+# 或者把脚本目录加进 PATH，之后直接敲 dust
+export PATH="$PWD/framework/cmd/build:$PATH"
+dust build
+dust run
 ```
 
 ### 运行配置

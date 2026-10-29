@@ -1,9 +1,9 @@
 /**
  * @file thread.hpp
  * @author qingyu
- * @brief Linux 线程封装：受管任务外壳、运行统计、暂停恢复与停止通知
- * @version 0.2
- * @date 2026-10-22
+ * @brief Linux 线程封装：受管任务外壳、运行统计、暂停恢复、停止通知与故障处置
+ * @version 0.3
+ * @date 2026-10-29
  *
  * @copyright Copyright (c) 2026
  *
@@ -22,7 +22,8 @@
 #include <pthread.h>
 #include <unistd.h>
 #include "framework/init/startup/System_startup.hpp"
-#include "framework/cmd/shell/log/log.hpp"
+#include "framework/shell/log/log.hpp"
+#include "thread_fault.hpp"
 
 namespace init
 {
@@ -35,7 +36,7 @@ struct ThreadStats
     const char* name;               // 线程名
     uint32_t    run_count;          // 任务体进入次数
     uint32_t    retry_count;        // 可恢复错误次数
-    uint32_t    fatal_count;        // 不可恢复错误次数
+    uint32_t    exit_count;         // 任务主动退出次数
     uint32_t    drop_count;         // 业务丢帧/丢包计数
     uint64_t    run_ns;             // 任务体累计执行时间
     uint64_t    max_run_ns;         // 单次最长执行时间
@@ -71,6 +72,24 @@ public:
      * @brief 是否处于暂停状态
      */
     virtual bool Paused() const = 0;
+
+    /**
+     * @brief 请求终止线程：置停止标志并唤醒所有等待点
+     *
+     * 协作式：目标线程从 Run 返回时执行亡语并注销注册表，本函数不 join。
+     * 自己调用即自杀（当前拍结束后退出），其他线程调用即请求它退出。
+     */
+    virtual void Exit() = 0;
+
+    /**
+     * @brief 本线程的故障策略
+     */
+    virtual ThreadFaultPolicy FaultPolicy() const = 0;
+
+    /**
+     * @brief 是否带保留标记
+     */
+    virtual bool KeepAlive() const = 0;
 };
 
 /**
@@ -78,6 +97,12 @@ public:
  * @param thread 已创建的线程对象
  */
 void RegisterThreadInstance(ThreadBase* thread);
+
+/**
+ * @brief 线程注销入口（定义在 Init_entry.cpp，供 Run 收尾调用）
+ * @param thread 即将退出的线程对象
+ */
+void UnregisterThreadInstance(ThreadBase* thread);
 
 /**
  * @brief Linux 线程与可中断等待封装
@@ -107,8 +132,8 @@ public:
     enum class TaskResult : uint8_t
     {
         Continue = 0,   // 本拍正常结束：外壳等下一拍再调一次
-        Retry    = 1,   // 可恢复错误：交给恢复钩子
-        Fatal    = 2,   // 不可恢复错误：记录后退出
+        Retry    = 1,   // 可恢复错误：交给 RetryHook
+        Exit     = 2,   // 需要退出：跳过 RetryHook，直接交给 DefaultHandle
     };
 
     /**
@@ -117,43 +142,17 @@ public:
     using TaskFunc = TaskResult (*)(void* context);
 
     /**
-     * @brief 异常恢复结果，正常停止由线程停止标志单独判断
-     */
-    enum class RecoveryAction
-    {
-        Restart,    // 恢复成功，重新执行任务入口
-        Stop        // 无法恢复，请求统一退出
-    };
-
-    using RecoveryHook = RecoveryAction (*)(const std::exception&, Thread&, void*);
-
-    /**
-     * @brief 注册可选异常恢复回调，未注册时保持统一退出行为
-     * @param hook 恢复回调，空指针表示禁用
-     * @param context 业务上下文，生命周期必须覆盖 Join()
-     * @throws std::logic_error 线程尚未回收
-     * @note 仅由拥有者在 Start() 前调用，不得与启动或回收并发
-     */
-    void SetRecoveryHook(RecoveryHook hook, void* context = nullptr)
-    {
-        if (life_.worker.joinable())
-        {
-            throw std::logic_error("cannot change recovery hook before thread is joined");
-        }
-        task_.hook = hook;
-        task_.hook_context = context;
-    }
-
-    /**
      * @brief 启动受管任务：外壳负责循环、周期等待与停止判断，任务体只写一拍
      *
      * @param entry 任务入口，每拍调用一次
      * @param period 两拍之间的等待时长；0 表示任务自己阻塞，不额外等待
      * @param context 任务上下文，每拍原样传回
      * @param name Linux 线程名，最多 15 字节
+     * @param fault 故障配置（钩子 / 策略 / 保留标记），不传即全默认
      * @throws std::exception 入口无效、线程未回收或创建失败
      */
-    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr)
+    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr,
+               const ThreadFaultConfig& fault = {})
     {
         if (entry == nullptr)
         {
@@ -178,6 +177,7 @@ public:
         task_.entry = entry;
         task_.period = period;
         task_.context = context;
+        fault_ = fault;
         life_.worker = std::thread(&Thread::Run, this);
 
         RegisterThreadInstance(this);   // 登记到注册表，供 shell 的 thread 命令遍历
@@ -273,7 +273,7 @@ public:
         out.name        = life_.name.c_str();
         out.run_count   = counters_.run_count.load();
         out.retry_count = counters_.retry_count.load();
-        out.fatal_count = counters_.fatal_count.load();
+        out.exit_count  = counters_.exit_count.load();
         out.drop_count  = counters_.drop_count.load();
         out.run_ns      = counters_.run_ns.load();
         out.max_run_ns  = counters_.max_run_ns.load();
@@ -291,7 +291,7 @@ public:
     {
         counters_.run_count.store(0);
         counters_.retry_count.store(0);
-        counters_.fatal_count.store(0);
+        counters_.exit_count.store(0);
         counters_.drop_count.store(0);
         counters_.run_ns.store(0);
         counters_.max_run_ns.store(0);
@@ -325,6 +325,38 @@ public:
     {
         std::lock_guard<std::mutex> lock(pause_.mutex);
         return pause_.paused;
+    }
+
+    /**
+     * @brief 请求终止线程：置停止标志并唤醒所有等待点
+     *
+     * 协作式：目标线程从 Run 返回时执行亡语并注销注册表，本函数不 join。
+     * 带保留标记的线程（shell）拒绝退出。
+     */
+    void Exit() override
+    {
+        if (fault_.keep_alive)
+        {
+            DUST_LOG_WRN("thread %s is reserved, exit refused", Name());
+            return;
+        }
+        RequestStop();
+    }
+
+    /**
+     * @brief 本线程的故障策略
+     */
+    ThreadFaultPolicy FaultPolicy() const override
+    {
+        return fault_.policy;
+    }
+
+    /**
+     * @brief 是否带保留标记
+     */
+    bool KeepAlive() const override
+    {
+        return fault_.keep_alive;
     }
 
     /**
@@ -376,9 +408,7 @@ private:
     {
         TaskFunc     entry = nullptr;                   // 受管任务入口
         void*        context = nullptr;                 // 受管任务上下文
-        RecoveryHook hook = nullptr;                    // 可选业务异常恢复入口
-        void*        hook_context = nullptr;            // 由调用方持有的恢复上下文
-        std::chrono::milliseconds period {0};      // 两拍之间的等待时长；0 表示不额外等待
+        std::chrono::milliseconds period {0};           // 两拍之间的等待时长；0 表示不额外等待
     };
 
     /**
@@ -388,18 +418,19 @@ private:
     {
         std::atomic<uint32_t> run_count   {0};      // 任务体进入次数
         std::atomic<uint32_t> retry_count {0};      // 可恢复错误次数
-        std::atomic<uint32_t> fatal_count {0};      // 不可恢复错误次数
+        std::atomic<uint32_t> exit_count  {0};      // 任务主动退出次数
         std::atomic<uint32_t> drop_count  {0};      // 业务计数
         std::atomic<uint64_t> run_ns      {0};      // 累计执行时间
         std::atomic<uint64_t> max_run_ns  {0};      // 单次最长执行时间
         std::atomic<uint64_t> last_run_ns {0};      // 最近一次执行时间
     };
 
-    Lifecycle  life_;
-    StopSignal stop_;
-    PauseState pause_;
-    TaskSlot   task_;
-    Counters   counters_;
+    Lifecycle        life_;
+    StopSignal       stop_;
+    PauseState       pause_;
+    TaskSlot         task_;
+    Counters         counters_;
+    ThreadFaultConfig fault_ {};                        // 故障处置（Start 时由参数定死）
 
     /**
      * @brief 拍间挂起，返回 false 表示挂起期间收到了停止请求
@@ -464,41 +495,51 @@ private:
                 {
                     if (StopRequested())
                     {
-                        break;
-                    }
-
-                    if (task_.hook == nullptr)
-                    {
-                        throw;
+                        break;                  // 停机路径：任务被唤醒后抛的异常不算故障
                     }
 
                     counters_.retry_count.fetch_add(1);
-                    if (task_.hook(error, *this, task_.hook_context) != RecoveryAction::Restart)
+                    if (fault_.retry == nullptr ||
+                        fault_.retry(error, *this, task_.context) != RecoveryAction::Restart)
                     {
-                        throw;
+                        if (StopRequested())
+                        {
+                            break;
+                        }
+                        DefaultHandle(this);
+                        break;
                     }
                 }
 
                 RecordRun(std::chrono::steady_clock::now() - begin);
 
-                if (result == TaskResult::Fatal)
+                if (result == TaskResult::Exit)
                 {
-                    counters_.fatal_count.fetch_add(1);
-                    DUST_LOG_ERR("thread %s fatal", life_.name.c_str());
+                    counters_.exit_count.fetch_add(1);
+
+                    // 停机路径下的 Exit 是正常退出（下游通道被关闭），不按故障处置
+                    if (StopRequested())
+                    {
+                        break;
+                    }
+
+                    DefaultHandle(this);
                     break;
                 }
 
                 if (result == TaskResult::Retry)
                 {
                     counters_.retry_count.fetch_add(1);
-                    if (task_.hook == nullptr)
-                    {
-                        break;
-                    }
 
                     const std::runtime_error retry("task retry");
-                    if (task_.hook(retry, *this, task_.hook_context) != RecoveryAction::Restart)
+                    if (fault_.retry == nullptr ||
+                        fault_.retry(retry, *this, task_.context) != RecoveryAction::Restart)
                     {
+                        if (StopRequested())
+                        {
+                            break;
+                        }
+                        DefaultHandle(this);
                         break;
                     }
                 }
@@ -518,6 +559,14 @@ private:
         {
             System_RequestStop(1);
         }
+
+        // 统一收尾：亡语 → 注销注册表 → 结束
+        if (fault_.exit != nullptr)
+        {
+            fault_.exit(task_.context);
+        }
+        UnregisterThreadInstance(this);
+        DUST_LOG_WRN("thread %s exited", Name());
 
         life_.finished.store(true);
     }

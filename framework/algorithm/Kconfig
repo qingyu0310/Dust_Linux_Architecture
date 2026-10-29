@@ -1,4 +1,4 @@
-# algorithm/Kconfig —— 算法能力：圆点阵标定、YOLO 装甲板检测、局部灯条精修。
+# algorithm/Kconfig —— 算法能力：滤波与数学工具。
 # 架构层能力默认 n，由业务层 select 拉起。
 
 config DUST_FLT_KALMAN
@@ -25,64 +25,3 @@ config DUST_MATH_ANGLE
     default n
     help
       Angle wrap/compare helpers (algorithm/math/angle.hpp).
-
-config DUST_CALIB
-    bool "circle-grid camera calibration"
-    default n
-    help
-      Planar circle-grid intrinsic solver and reprojection check (algorithm/calib).
-
-config DUST_VISION_CORE
-    bool "vision domain types"
-    default n
-    help
-      Detected armor result contract and normalised light-bar type (vision/core).
-
-config DUST_VISION_MODEL
-    bool "armor model output decoding"
-    default n
-    help
-      Model label/colour decoding shared by any armor post-processing
-      (vision/detect/model_decode).
-
-config DUST_VISION_DETECT
-    bool "TensorRT armor detector"
-    default n
-    select DUST_VISION_CORE
-    select DUST_VISION_MODEL
-    help
-      TensorRT 0526 armor detector: preprocess, inference and postprocess
-      (vision/detect/armor_detector).
-
-config DUST_VISION_YOLO_REFINER
-    bool "local light-bar corner refiner"
-    default n
-    select DUST_VISION_CORE
-    help
-      Compile the optional OpenCV light-bar corner refiner (vision/refine).
-
-config DUST_VISION_POSE
-    bool "armor pose (PnP)"
-    default n
-    select DUST_VISION_CORE
-    help
-      Single-armor camera-frame pose from the detected corners and the calibrated
-      intrinsics: object points, IPPE solve and reprojection check (vision/pose).
-
-config DUST_VISION_TRACK
-    bool "armor cross-frame tracking"
-    default n
-    select DUST_VISION_POSE
-    select DUST_FLT_KALMAN_EKF
-    select DUST_MATH_ANGLE
-    help
-      Single-target cross-frame state estimation: rotation centre, angle, radius
-      and the four-armor derivation (vision/track).
-
-config DUST_VISION_MULTI_TRACK
-    bool "multi-target numbering router"
-    default n
-    select DUST_VISION_TRACK
-    help
-      Fixed tracking slots bound to robot labels at compile time, dispatch by
-      label and per-slot face matching (vision/track/multi_target).
