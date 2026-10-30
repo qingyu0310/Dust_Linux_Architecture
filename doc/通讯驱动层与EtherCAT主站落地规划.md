@@ -5,6 +5,11 @@
 > 目标工程：`/home/rmconstruction/Desktop/qingyu`（Linux / C++17 骨架，`framework/drivers/` 当前**是空目录、未入库**）
 > 从站实物：HPM6E00EVK（HPM6E80 片内 ESC），状态见 `doc/EtherCAT从站当前状态-给主站.md`
 > 主站机器：本机 `rmconstruction-NUC10i7FNH`，2× Intel I225-LM（`igc`）
+>
+> **⚠️ 本文的驱动接口已被取代**：`Master` 类与 `Init`/`Send`/`Receive` 三件套已重构为 `Ecat` 九阶段接口
+> （`Open`/`Discover`/`Enumerate`/`ConfigureSlaves`/`ConfigurePdo`/`ConfigureDc`/`RequestState`/
+> `Exchange`/`Monitor`/`Recover`），文件为 `framework/drivers/communication/ethercat/ecat.hpp|.cpp`。
+> 现行接口与步骤见 `doc/EtherCAT主站重构规划.md`。本文其余内容（目录约定、Kconfig、CMake、SOEM 安装）仍然有效。
 
 ---
 

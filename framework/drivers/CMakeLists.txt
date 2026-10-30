@@ -30,17 +30,15 @@ if(CONFIG_DUST_COM_ETHERCAT)
             "  sudo cmake --install ~/src/SOEM/build")
     endif()
 
-    add_library(framework_ethercat STATIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/communication/ethercat/ethercat.cpp)
-    target_include_directories(framework_ethercat PUBLIC
-        ${PROJECT_SOURCE_DIR} ${SOEM_INCLUDE_DIR})
-    target_include_directories(framework_ethercat PRIVATE
+    add_library(framework_ethercat INTERFACE)
+    target_include_directories(framework_ethercat INTERFACE
+        ${PROJECT_SOURCE_DIR}
+        ${SOEM_INCLUDE_DIR}
         ${PROJECT_SOURCE_DIR}/framework/shell/log
         ${PROJECT_SOURCE_DIR}/framework/shell/log/process
         ${PROJECT_SOURCE_DIR}/framework/shell/log/queue
         ${PROJECT_SOURCE_DIR}/framework/shell/log/transport
         ${PROJECT_SOURCE_DIR}/framework/shell/log/editor)
-    target_link_libraries(framework_ethercat PUBLIC
+    target_link_libraries(framework_ethercat INTERFACE
         ${SOEM_LIBRARY} Threads::Threads)
-    target_compile_options(framework_ethercat PRIVATE -Wall -Wextra -Wpedantic)
 endif()

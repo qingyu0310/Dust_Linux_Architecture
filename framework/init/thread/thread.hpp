@@ -2,7 +2,7 @@
  * @file thread.hpp
  * @author qingyu
  * @brief Linux 线程封装：受管任务外壳、运行统计、暂停恢复、停止通知与故障处置
- * @version 0.3
+ * @version 0.4
  * @date 2026-10-29
  *
  * @copyright Copyright (c) 2026
@@ -24,6 +24,8 @@
 #include "framework/init/startup/System_startup.hpp"
 #include "framework/shell/log/log.hpp"
 #include "thread_fault.hpp"
+
+#define DUST_MSEC(ms) std::chrono::milliseconds(ms)
 
 namespace init
 {
