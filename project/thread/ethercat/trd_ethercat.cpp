@@ -75,15 +75,26 @@ static init::Thread::TaskResult Task(void* context)
         return init::Thread::TaskResult::Retry;
     }
 
-    DUST_LOG_DBG("ethercat", "out[0]=0x%08x in[0]=0x%08x", ecat_.OutputsRef().counter[0], ecat_.InputsRef().counter[0]);
+    const PdoInputs& inputs  = ecat_.InputsRef();
+    const drivers::ethercat::SlaveInfo& slave = ecat_.Slave(1);
+
+    DUST_LOG_DBG("ethercat",
+                 "rx %08x %08x %08x %08x %08x %08x %08x %08x | wkc=%u/%u al_status=0x%04x al_code=0x%04x",
+                 inputs.counter[0], inputs.counter[1], inputs.counter[2], inputs.counter[3],
+                 inputs.counter[4], inputs.counter[5], inputs.counter[6], inputs.counter[7],
+                 static_cast<unsigned>(ecat_.LastWkc()),
+                 static_cast<unsigned>(ecat_.ExpectedWkc()),
+                 static_cast<unsigned>(slave.al_state),
+                 static_cast<unsigned>(slave.al_status));
 
     return init::Thread::TaskResult::Continue;
 }
 
 /**
- * @brief 链路故障处置：拆链后重新建链
+ * @brief 链路故障处置：先尝试原地恢复，恢复不了再重建链路
  *
- * 不阻塞，停机请求由外壳判断。
+ * 从站退 SAFE-OP 只是输出了停，链路还在，`Recover()` 确认错误位后重新请求 OP，
+ * 比拆链重建快得多；只有链路真断了（读不到 AL 状态）才 `Close` + `Init`。
  *
  * @param error   框架构造的异常
  * @param thread  出故障的线程，本钩子不使用
@@ -96,6 +107,13 @@ static RecoveryAction OnRetry(const std::exception& error, init::Thread& thread,
     (void)context;
 
     DUST_LOG_WRN("ecat: task retry: %s", error.what());
+
+    if (ecat_.Recover())
+    {
+        return RecoveryAction::Restart;
+    }
+
+    DUST_LOG_WRN("ecat: recover failed, rebuilding link");
 
     ecat_.Close();
 

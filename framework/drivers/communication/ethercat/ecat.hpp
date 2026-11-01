@@ -13,7 +13,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <thread>
 #include <vector>
@@ -132,12 +134,26 @@ public:
 
         auto* ctx = static_cast<ecx_contextt*>(link_.context);
 
+        // 发送间隔先算再更新：抓到的是「这一拍距上一拍」的停顿，超阈值立刻报
+        const auto     now       = std::chrono::steady_clock::now();
+        const uint64_t gap_us    = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - stats_.last_send).count());
+        if (stats_.last_send != std::chrono::steady_clock::time_point {} && gap_us > kSendGapWarnUs)
+        {
+            DUST_LOG_ERR("master gap: time=%s gap_us=%llu last_wkc=%u",
+                         NowText().c_str(),
+                         static_cast<unsigned long long>(gap_us),
+                         static_cast<unsigned>(stats_.last_wkc));
+        }
+
         const int sent = ecx_send_processdata(ctx);
         if (sent <= 0)
         {
-            DUST_LOG_ERR("ecat: send_processdata returned %d", sent);
+            DUST_LOG_ERR("ecat: time=%s send_result=%d last_wkc=%u", NowText().c_str(), sent, static_cast<unsigned>(stats_.last_wkc));
             return false;
         }
+
+        stats_.last_send = now;
 
         return true;
     }
@@ -177,9 +193,62 @@ public:
 
         stats_.last_wkc = (wkc > 0) ? static_cast<uint32_t>(wkc) : 0U;
 
-        if (wkc < 0 || static_cast<uint32_t>(wkc) < pdo_.expected_wkc)
+        const bool wkc_ok = (wkc > 0) && (static_cast<uint32_t>(wkc) >= pdo_.expected_wkc);
+
+        // 周期监测 AL 状态：WKC 掉时立刻读，平时每 kStatusPollMs 读一次。
+        // 只看 WKC 不够——从站退 SAFE-OP 后输出已停，但输入方向仍在计数。
+        const bool poll_due = ElapsedMs(stats_.last_poll) >= kStatusPollMs;
+        if (!wkc_ok || poll_due)
         {
-            DUST_LOG_ERR("ecat: receive wkc=%d expected=%u", wkc, static_cast<unsigned>(pdo_.expected_wkc));
+            stats_.last_poll = std::chrono::steady_clock::now();
+
+            uint16_t status = 0;
+            uint16_t code   = 0;
+            if (ReadAlStatus(1, status, code))
+            {
+                const uint32_t since_send_ms = ElapsedMs(stats_.last_send);
+                const bool     in_op         = (status & 0x000F) == EC_STATE_OPERATIONAL;
+                const bool     error         = (status & kAlStatusErrorBit) != 0;
+                const bool     bad           = !wkc_ok || !in_op || error;
+
+                // 只在「进入故障」那一刻打一次完整判定，不每拍刷屏；恢复时再打一次
+                if (bad && !stats_.faulted)
+                {
+                    stats_.faulted = true;
+
+                    // 责任方判定：最近一次发送距今多久，决定是主站没发还是从站没收
+                    const char* side = (since_send_ms > kSendGapWarnUs / 1000U)
+                                           ? "MASTER(发送停顿)"
+                                           : "SLAVE(未处理输出)";
+
+                    DUST_LOG_ERR("ecat: FAULT time=%s side=%s recv_wkc=%d expected=%u al_status=0x%04x al_code=0x%04x since_send=%u ms",
+                                 NowText().c_str(),
+                                 side,
+                                 wkc,
+                                 static_cast<unsigned>(pdo_.expected_wkc),
+                                 static_cast<unsigned>(status),
+                                 static_cast<unsigned>(code),
+                                 static_cast<unsigned>(since_send_ms));
+                }
+                else if (!bad && stats_.faulted)
+                {
+                    stats_.faulted = false;
+                    DUST_LOG_OK("ecat: RECOVERED time=%s recv_wkc=%d al_status=0x%04x al_code=0x%04x",
+                                NowText().c_str(),
+                                wkc,
+                                static_cast<unsigned>(status),
+                                static_cast<unsigned>(code));
+                }
+            }
+            else
+            {
+                // 读不到就不能显示上次缓存的 OP 值，直接报读取失败
+                DUST_LOG_ERR("ecat: time=%s read AL status failed", NowText().c_str());
+            }
+        }
+
+        if (!wkc_ok)
+        {
             return -1;
         }
 
@@ -188,6 +257,80 @@ public:
         DUST_LOG_DBG("ecat", "wkc=%d expected=%u", wkc, static_cast<unsigned>(pdo_.expected_wkc));
 
         return static_cast<int>(sizeof(In));
+    }
+
+    /**
+     * @brief 从 SAFE-OP 错误态恢复：确认错误 → 请求 OP → 核对实际状态
+     *
+     * 只写 AL Control 不代表已进 OP，必须读回真实 AL Status。
+     *
+     * @return true=从站实际回到 OP
+     */
+    bool Recover()
+    {
+        if (!pdo_.configured || link_.context == nullptr || slaves_.empty())
+        {
+            DUST_LOG_ERR("ecat: Recover before Init");
+            return false;
+        }
+
+        uint16_t status = 0;
+        uint16_t code   = 0;
+        if (!ReadAlStatus(1, status, code))
+        {
+            DUST_LOG_ERR("ecat: time=%s recover read AL status failed", NowText().c_str());
+            return false;
+        }
+
+        DUST_LOG_WRN("ecat: time=%s recover begin al_status=0x%04x al_code=0x%04x",
+                     NowText().c_str(),
+                     static_cast<unsigned>(status),
+                     static_cast<unsigned>(code));
+
+        // 错误位在就先确认：AL Control 写 SAFE-OP + 错误确认位（0x10）
+        if ((status & kAlStatusErrorBit) != 0)
+        {
+            auto*          ctx       = static_cast<ecx_contextt*>(link_.context);
+            const uint16_t configadr = ctx->slavelist[1].configadr;
+            const uint16_t ack       = static_cast<uint16_t>(EC_STATE_SAFE_OP | kAlStatusErrorBit);
+
+            const int wkc = ecx_FPWRw(&ctx->port, configadr, ECT_REG_ALCTL, htoes(ack), EC_TIMEOUTRET3);
+            DUST_LOG_INF("ecat: time=%s recover ack=0x%04x wkc=%d", NowText().c_str(), static_cast<unsigned>(ack), wkc);
+        }
+
+        DUST_LOG_INF("ecat: time=%s recover request OP", NowText().c_str());
+
+        // 保持周期过程数据交换，再请求 OP
+        if (!RequestState(1, EC_STATE_OPERATIONAL))
+        {
+            DUST_LOG_ERR("ecat: time=%s recover failed to reach OP", NowText().c_str());
+            return false;
+        }
+
+        if (!ReadAlStatus(1, status, code))
+        {
+            DUST_LOG_ERR("ecat: time=%s recover read back AL status failed", NowText().c_str());
+            return false;
+        }
+
+        const bool in_op = (status & 0x000F) == EC_STATE_OPERATIONAL;
+        const bool error = (status & kAlStatusErrorBit) != 0;
+
+        if (!in_op || error)
+        {
+            DUST_LOG_ERR("ecat: time=%s recover failed: al_status=0x%04x al_code=0x%04x",
+                         NowText().c_str(),
+                         static_cast<unsigned>(status),
+                         static_cast<unsigned>(code));
+            return false;
+        }
+
+        DUST_LOG_OK("ecat: time=%s recover success al_status=0x%04x al_code=0x%04x",
+                    NowText().c_str(),
+                    static_cast<unsigned>(status),
+                    static_cast<unsigned>(code));
+
+        return true;
     }
 
     /**
@@ -234,7 +377,17 @@ public:
     const Config&      GetConfig() 	   const { return config_; }                    // 主站配置
     const std::string& InterfaceName() const { return config_.interface_name; }  	// 实际使用的网口
     uint32_t           ExpectedWkc()   const { return pdo_.expected_wkc; }         	// 期望工作计数器
-    bool               IsReady() 	   const { return pdo_.configured;   }          // 链路是否已建好
+    uint32_t           LastWkc() 	   const { return stats_.last_wkc;    }          // 最近一次收到的 WKC
+
+    /**
+     * @brief 链路是否可用：PDO 已映射且从站实际仍在 OP
+     *
+     * 只看 configured 会把「已退 SAFE-OP」误判成可用。
+     */
+    bool IsReady() const
+    {
+        return pdo_.configured && !slaves_.empty() && (slaves_[0].al_state & 0x000F) == EC_STATE_OPERATIONAL;
+    }
 
 private:
     struct Link
@@ -253,13 +406,19 @@ private:
 
     struct Stats
     {
-        uint32_t last_wkc = 0;                      // 最近一次收到的 WKC
+        uint32_t last_wkc = 0;                              // 最近一次收到的 WKC
+        std::chrono::steady_clock::time_point last_send {}; // 最近一次成功发送的时刻
+        std::chrono::steady_clock::time_point last_poll {}; // 最近一次读 AL 状态的时刻
+        bool     faulted  = false;                          // 当前是否处于故障态（用于只报一次）
     };
 
     static constexpr uint32_t kIoMapBytes          = 4096;   	// IOmap 缓冲上限（字节）
     static constexpr uint32_t kStateCheckUs        = 1000;   	// 单次状态查询超时（µs）
     static constexpr uint32_t kWriteRetryYieldMs   = 1;      	// 写请求失败后的重试间隔（ms）
     static constexpr uint32_t kStateWriteTimeoutMs = 1000; 	 	// 状态请求写入/到达的总超时（ms）
+    static constexpr uint32_t kStatusPollMs        = 100;    	// 周期读 AL 状态间隔（ms）
+    static constexpr uint32_t kSendGapWarnUs       = 20000;  	// 发送间隔告警阈值（µs）
+    static constexpr uint16_t kAlStatusErrorBit    = 0x0010; 	// AL Status 的错误位
 
 	Config                 config_  {};             // 主站配置
     Link                   link_    {};             // 连接与上下文
@@ -648,6 +807,64 @@ private:
     static uint32_t ElapsedMs(const std::chrono::steady_clock::time_point& begin)
     {
         return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count());
+    }
+
+    /**
+     * @brief 当前墙上时间，格式 HH:MM:SS.mmm
+     *
+     * 日志要能和多机/抓包时间对上，所以用系统时间而不是单调时钟。
+     *
+     * @return 时间字符串
+     */
+    static std::string NowText()
+    {
+        using namespace std::chrono;
+
+        const auto      now     = system_clock::now();
+        const auto      whole_s = time_point_cast<seconds>(now);
+        const auto      millis  = duration_cast<milliseconds>(now - whole_s).count();
+        const std::time_t raw   = system_clock::to_time_t(now);
+
+        std::tm local {};
+        localtime_r(&raw, &local);
+
+        char buffer[16] = {};
+        std::snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d.%03d",
+                      local.tm_hour, local.tm_min, local.tm_sec, static_cast<int>(millis));
+
+        return buffer;
+    }
+
+    /**
+     * @brief 从 ESC 读完整 AL Status（0x0130）与 AL Status Code（0x0134）
+     *
+     * 0x0130 是状态 0x0F 加错误位 0x10，软件缓存里的 state 不含错误位。
+     *
+     * @param index 从站序号（1 起）
+     * @param status 输出：完整 AL Status
+     * @param code 输出：AL Status Code
+     * @return true=读取成功
+     */
+    bool ReadAlStatus(uint16_t index, uint16_t& status, uint16_t& code)
+    {
+        auto*                    ctx       = static_cast<ecx_contextt*>(link_.context);
+        const uint16_t           configadr = ctx->slavelist[index].configadr;
+        uint16_t                 raw_status = 0;
+        uint16_t                 raw_code   = 0;
+
+        if (ecx_FPRD(&ctx->port, configadr, ECT_REG_ALSTAT, sizeof(raw_status), &raw_status, EC_TIMEOUTRET3) <= 0 ||
+            ecx_FPRD(&ctx->port, configadr, ECT_REG_ALSTATCODE, sizeof(raw_code), &raw_code, EC_TIMEOUTRET3) <= 0)
+        {
+            return false;
+        }
+
+        status = etohs(raw_status);
+        code   = etohs(raw_code);
+
+        slaves_[index - 1].al_state  = status;
+        slaves_[index - 1].al_status = code;
+
+        return true;
     }
 
     /**
