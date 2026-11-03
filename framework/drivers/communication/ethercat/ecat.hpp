@@ -140,10 +140,7 @@ public:
             std::chrono::duration_cast<std::chrono::microseconds>(now - stats_.last_send).count());
         if (stats_.last_send != std::chrono::steady_clock::time_point {} && gap_us > kSendGapWarnUs)
         {
-            DUST_LOG_ERR("master gap: time=%s gap_us=%llu last_wkc=%u",
-                         NowText().c_str(),
-                         static_cast<unsigned long long>(gap_us),
-                         static_cast<unsigned>(stats_.last_wkc));
+            DUST_LOG_ERR("master gap: time=%s gap_us=%llu last_wkc=%u", NowText().c_str(), static_cast<unsigned long long>(gap_us), static_cast<unsigned>(stats_.last_wkc));
         }
 
         const int sent = ecx_send_processdata(ctx);
@@ -180,10 +177,7 @@ public:
         }
         if ((static_cast<size_t>(info.input_offset) + sizeof(In)) > link_.io_map.size())
         {
-            DUST_LOG_ERR("ecat: slave 1 input offset %u + %u B out of io_map %u",
-                         static_cast<unsigned>(info.input_offset),
-                         static_cast<unsigned>(sizeof(In)),
-                         static_cast<unsigned>(link_.io_map.size()));
+            DUST_LOG_ERR("ecat: slave 1 input offset %u + %u B out of io_map %u", static_cast<unsigned>(info.input_offset), static_cast<unsigned>(sizeof(In)), static_cast<unsigned>(link_.io_map.size()));
             return -1;
         }
 
@@ -213,13 +207,11 @@ public:
 
                 // 只在「进入故障」那一刻打一次完整判定，不每拍刷屏；恢复时再打一次
                 if (bad && !stats_.faulted)
-                {
+				{
                     stats_.faulted = true;
 
                     // 责任方判定：最近一次发送距今多久，决定是主站没发还是从站没收
-                    const char* side = (since_send_ms > kSendGapWarnUs / 1000U)
-                                           ? "MASTER(发送停顿)"
-                                           : "SLAVE(未处理输出)";
+                    const char* side = (since_send_ms > kSendGapWarnUs / 1000U) ? "MASTER(发送停顿)" : "SLAVE(未处理输出)";
 
                     DUST_LOG_ERR("ecat: FAULT time=%s side=%s recv_wkc=%d expected=%u al_status=0x%04x al_code=0x%04x since_send=%u ms",
                                  NowText().c_str(),

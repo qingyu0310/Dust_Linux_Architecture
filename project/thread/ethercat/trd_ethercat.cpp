@@ -20,21 +20,21 @@ namespace thread::ethercat
 /**
  * @brief 过程数据：主站写给从站（RxPDO）
  *
- * 从站固件按 8 个 UDINT、合计 32 字节配置。
+ * 从站固件按 64 个 UDINT、合计 256 字节配置。
  */
 struct PdoOutputs
 {
-    uint32_t counter[8];    // 输出计数器
+    uint32_t counter[64];    // 输出计数器
 };
 
 /**
  * @brief 过程数据：从站回给主站（TxPDO）
  *
- * 从站固件按 8 个 UDINT、合计 32 字节配置。
+ * 从站固件按 64 个 UDINT、合计 256 字节配置。
  */
 struct PdoInputs
 {
-    uint32_t counter[8];    // 输入计数器
+    uint32_t counter[64];    // 输入计数器
 };
 
 static drivers::ethercat::Ecat<PdoOutputs, PdoInputs> ecat_ {};    	// 主站实例
