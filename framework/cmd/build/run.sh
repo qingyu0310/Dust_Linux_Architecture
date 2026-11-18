@@ -13,6 +13,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APP="${ROOT}/project/build/project/dust_app"
 
+# ROS 2 setup 脚本可能读取未定义变量，加载期间暂时关闭 nounset。
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+    set +u
+    source /opt/ros/humble/setup.bash
+    set -u
+fi
+
 if [[ "${1:-}" == "--build" ]]; then
     "${ROOT}/framework/cmd/build/build.sh"
     shift
@@ -26,9 +33,9 @@ if [[ ! -x "${APP}" ]]; then
     exit 1
 fi
 
-# EtherCAT 主站需要 CAP_NET_RAW，非 root 时用 sudo 重新执行
+# 提权后重新进入脚本加载 ROS 2，避免 sudo 清除动态库等运行环境。
 if [[ "${EUID}" -ne 0 ]]; then
-    exec sudo "${APP}" "$@"
+    exec sudo bash "${BASH_SOURCE[0]}" "$@"
 fi
 
 exec "${APP}" "$@"

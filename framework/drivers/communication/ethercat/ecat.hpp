@@ -143,6 +143,12 @@ public:
             DUST_LOG_ERR("master gap: time=%s gap_us=%llu last_wkc=%u", NowText().c_str(), static_cast<unsigned long long>(gap_us), static_cast<unsigned>(stats_.last_wkc));
         }
 
+        stats_.last_send_gap_us = stats_.last_send == std::chrono::steady_clock::time_point {} ? 0 : gap_us;
+        if (stats_.last_send_gap_us > stats_.max_send_gap_us)
+        {
+            stats_.max_send_gap_us = stats_.last_send_gap_us;
+        }
+
         const int sent = ecx_send_processdata(ctx);
         if (sent <= 0)
         {
@@ -191,6 +197,7 @@ public:
 
         // 周期监测 AL 状态：WKC 掉时立刻读，平时每 kStatusPollMs 读一次。
         // 只看 WKC 不够——从站退 SAFE-OP 后输出已停，但输入方向仍在计数。
+        bool state_ok = !stats_.faulted;
         const bool poll_due = ElapsedMs(stats_.last_poll) >= kStatusPollMs;
         if (!wkc_ok || poll_due)
         {
@@ -200,27 +207,24 @@ public:
             uint16_t code   = 0;
             if (ReadAlStatus(1, status, code))
             {
-                const uint32_t since_send_ms = ElapsedMs(stats_.last_send);
                 const bool     in_op         = (status & 0x000F) == EC_STATE_OPERATIONAL;
                 const bool     error         = (status & kAlStatusErrorBit) != 0;
                 const bool     bad           = !wkc_ok || !in_op || error;
+                state_ok = in_op && !error;
 
                 // 只在「进入故障」那一刻打一次完整判定，不每拍刷屏；恢复时再打一次
                 if (bad && !stats_.faulted)
 				{
                     stats_.faulted = true;
 
-                    // 责任方判定：最近一次发送距今多久，决定是主站没发还是从站没收
-                    const char* side = (since_send_ms > kSendGapWarnUs / 1000U) ? "MASTER(发送停顿)" : "SLAVE(未处理输出)";
-
-                    DUST_LOG_ERR("ecat: FAULT time=%s side=%s recv_wkc=%d expected=%u al_status=0x%04x al_code=0x%04x since_send=%u ms",
+                    DUST_LOG_ERR("ecat: FAULT time=%s recv_wkc=%d expected=%u al_status=0x%04x al_code=0x%04x send_gap_us=%llu max_send_gap_us=%llu",
                                  NowText().c_str(),
-                                 side,
                                  wkc,
                                  static_cast<unsigned>(pdo_.expected_wkc),
                                  static_cast<unsigned>(status),
                                  static_cast<unsigned>(code),
-                                 static_cast<unsigned>(since_send_ms));
+                                 static_cast<unsigned long long>(stats_.last_send_gap_us),
+                                 static_cast<unsigned long long>(stats_.max_send_gap_us));
                 }
                 else if (!bad && stats_.faulted)
                 {
@@ -234,12 +238,14 @@ public:
             }
             else
             {
+                state_ok = false;
+                stats_.faulted = true;
                 // 读不到就不能显示上次缓存的 OP 值，直接报读取失败
                 DUST_LOG_ERR("ecat: time=%s read AL status failed", NowText().c_str());
             }
         }
 
-        if (!wkc_ok)
+        if (!wkc_ok || !state_ok)
         {
             return -1;
         }
@@ -282,9 +288,9 @@ public:
         // 错误位在就先确认：AL Control 写 SAFE-OP + 错误确认位（0x10）
         if ((status & kAlStatusErrorBit) != 0)
         {
-            auto*          ctx       = static_cast<ecx_contextt*>(link_.context);
-            const uint16_t configadr = ctx->slavelist[1].configadr;
-            const uint16_t ack       = static_cast<uint16_t>(EC_STATE_SAFE_OP | kAlStatusErrorBit);
+            auto* ctx = static_cast<ecx_contextt*>(link_.context);
+            const uint16_t configadr  = ctx->slavelist[1].configadr;
+            const uint16_t ack        = static_cast<uint16_t>(EC_STATE_SAFE_OP | kAlStatusErrorBit);
 
             const int wkc = ecx_FPWRw(&ctx->port, configadr, ECT_REG_ALCTL, htoes(ack), EC_TIMEOUTRET3);
             DUST_LOG_INF("ecat: time=%s recover ack=0x%04x wkc=%d", NowText().c_str(), static_cast<unsigned>(ack), wkc);
@@ -378,7 +384,7 @@ public:
      */
     bool IsReady() const
     {
-        return pdo_.configured && !slaves_.empty() && (slaves_[0].al_state & 0x000F) == EC_STATE_OPERATIONAL;
+        return pdo_.configured && !slaves_.empty() && (slaves_[0].al_state & (0x000F | kAlStatusErrorBit)) == EC_STATE_OPERATIONAL;
     }
 
 private:
@@ -401,6 +407,8 @@ private:
         uint32_t last_wkc = 0;                              // 最近一次收到的 WKC
         std::chrono::steady_clock::time_point last_send {}; // 最近一次成功发送的时刻
         std::chrono::steady_clock::time_point last_poll {}; // 最近一次读 AL 状态的时刻
+        uint64_t last_send_gap_us = 0;
+        uint64_t max_send_gap_us = 0;
         bool     faulted  = false;                          // 当前是否处于故障态（用于只报一次）
     };
 
@@ -821,8 +829,7 @@ private:
         localtime_r(&raw, &local);
 
         char buffer[16] = {};
-        std::snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d.%03d",
-                      local.tm_hour, local.tm_min, local.tm_sec, static_cast<int>(millis));
+        std::snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d.%03d", local.tm_hour, local.tm_min, local.tm_sec, static_cast<int>(millis));
 
         return buffer;
     }

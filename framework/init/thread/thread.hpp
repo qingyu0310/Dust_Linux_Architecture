@@ -2,8 +2,8 @@
  * @file thread.hpp
  * @author qingyu
  * @brief Linux 线程封装：受管任务外壳、运行统计、暂停恢复、停止通知与故障处置
- * @version 0.4
- * @date 2026-10-29
+ * @version 0.5
+ * @date 2026-11-07
  *
  * @copyright Copyright (c) 2026
  *
@@ -26,6 +26,7 @@
 #include "thread_fault.hpp"
 
 #define DUST_MSEC(ms) std::chrono::milliseconds(ms)
+#define DUST_USEC(us) std::chrono::microseconds(us)
 
 namespace init
 {
@@ -147,13 +148,14 @@ public:
      * @brief 启动受管任务：外壳负责循环、周期等待与停止判断，任务体只写一拍
      *
      * @param entry 任务入口，每拍调用一次
-     * @param period 两拍之间的等待时长；0 表示任务自己阻塞，不额外等待
+     * @param period 两拍之间的等待时长，任意 chrono 时长（s/ms/us/ns 皆可）；0 表示任务自己阻塞，不额外等待
      * @param context 任务上下文，每拍原样传回
      * @param name Linux 线程名，最多 15 字节
      * @param fault 故障配置（钩子 / 策略 / 保留标记），不传即全默认
      * @throws std::exception 入口无效、线程未回收或创建失败
      */
-    void Start(TaskFunc entry, std::chrono::milliseconds period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr, const ThreadFaultConfig& fault = {})
+    template <typename Rep, typename Period>
+    void Start(TaskFunc entry, std::chrono::duration<Rep, Period> period = std::chrono::milliseconds(0), void* context = nullptr, const char* name = nullptr, const ThreadFaultConfig& fault = {})
     {
         if (entry == nullptr)
         {
@@ -176,7 +178,7 @@ public:
         }
 
         task_.entry = entry;
-        task_.period = period;
+        task_.period = std::chrono::duration_cast<std::chrono::microseconds>(period);
         task_.context = context;
         fault_ = fault;
         life_.worker = std::thread(&Thread::Run, this);
@@ -224,7 +226,7 @@ public:
      *
      * @param duration 休眠时长
      */
-    void Sleep(std::chrono::milliseconds duration)
+    void Sleep(std::chrono::microseconds duration)
     {
         std::this_thread::sleep_for(duration);
     }
@@ -406,7 +408,7 @@ private:
     {
         TaskFunc     entry = nullptr;                   // 受管任务入口
         void*        context = nullptr;                 // 受管任务上下文
-        std::chrono::milliseconds period {0};           // 两拍之间的等待时长；0 表示不额外等待
+        std::chrono::microseconds period {0};           // 两拍之间的等待时长；0 表示不额外等待
     };
 
     /**

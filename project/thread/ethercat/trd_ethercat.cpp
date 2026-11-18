@@ -12,33 +12,207 @@
 #include "Init_entry.hpp"
 #include "log.hpp"
 #include "thread.hpp"
+#include "var.hpp"
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include "framework/drivers/communication/ethercat/ecat.hpp"
+
+#if defined(CONFIG_DUST_TPC_ECAT_RX)
+#include "framework/topic/ecat_rx/ecat_rx.hpp"
+
+namespace topic::ecat_rx
+{
+Channel<Message> channel_;
+}
+
+namespace topic::ecat_tx
+{
+Channel<Message> channel_;
+}
+#endif
 
 namespace thread::ethercat
 {
 
-/**
- * @brief 过程数据：主站写给从站（RxPDO）
- *
- * 从站固件按 64 个 UDINT、合计 256 字节配置。
- */
+// 保持从站映射：双向各 64 个 uint32_t，业务包从 PDO 首字节开始。
 struct PdoOutputs
 {
-    uint32_t counter[64];    // 输出计数器
+    uint32_t counter[64];
 };
 
-/**
- * @brief 过程数据：从站回给主站（TxPDO）
- *
- * 从站固件按 64 个 UDINT、合计 256 字节配置。
- */
 struct PdoInputs
 {
-    uint32_t counter[64];    // 输入计数器
+    uint32_t counter[64];
 };
 
-static drivers::ethercat::Ecat<PdoOutputs, PdoInputs> ecat_ {};    	// 主站实例
-static init::Thread thread_ {};   									// 周期线程
+static_assert(sizeof(PdoOutputs) == 256, "RxPDO must be 256 bytes");
+static_assert(sizeof(PdoInputs) == 256, "TxPDO must be 256 bytes");
+static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,"Velocity requires IEEE 754 float32");
+
+/**
+ * @brief MCU 状态包解析结果；当前业务字段为占位值，不代表真实裁判数据
+ */
+struct StatusPacket
+{
+    uint8_t  sequence;
+    uint8_t  game_type;
+    uint16_t stage_remain_s;
+    uint8_t  game_progress;
+    uint16_t current_hp;
+    uint16_t maximum_hp;
+    uint8_t  robot_id;
+    uint8_t  chassis_power_enabled;
+    uint16_t zone_state_and_rfid;
+    uint16_t ally_control_degree;
+    uint16_t enemy_control_degree;
+};
+
+static drivers::ethercat::Ecat<PdoOutputs, PdoInputs> ecat_ {};
+static init::Thread thread_ {};
+static std::mutex   command_mutex_;
+static float linear_x_ = 0.0f;       // 前向速度 m/s，向前为正
+static float linear_y_ = 0.0f;       // 横向速度 m/s，向左为正
+static bool  status_invalid_ = false;
+
+static topic::Subscriber<topic::ecat_tx::Message> command_subscriber_ {topic::ecat_tx::channel_};
+static topic::ecat_tx::Message ros_command_ {};
+static bool ros_command_received_ = false;
+static bool ros_command_active_ = false;                			// ROS 命令正在下发
+static std::chrono::steady_clock::time_point last_ros_log_ {}; 		// 下发日志限频
+
+/**
+ * @brief 命令包与状态包共用 CRC16：初值 0xFFFF，右移多项式 0x8408，无最终异或
+ */
+static uint16_t Crc16(const uint8_t* data, size_t size)
+{
+    uint16_t crc = 0xFFFF;
+
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            crc = (crc & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
+        }
+    }
+
+    return crc;
+}
+
+/**
+ * @brief 从未对齐的协议字节读取小端 uint16_t
+ */
+static uint16_t ReadUint16(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0] | (static_cast<uint16_t>(data[1]) << 8));
+}
+
+/**
+ * @brief 将 float 的 IEEE 754 位模式按小端写入，不做数值转整数
+ */
+static void WriteFloat(uint8_t* data, float value)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    for (unsigned i = 0; i < sizeof(bits); ++i) {
+        data[i] = static_cast<uint8_t>(bits >> (8 * i));
+    }
+}
+
+/**
+ * @brief 快照 var 速度并组装 15 字节命令，其余 PDO 清零；当前角速度固定为零
+ */
+static void UpdateCommand()
+{
+    float linear_x = 0.0f;
+    float linear_y = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        linear_x = linear_x_;
+        linear_y = linear_y_;
+    }
+
+    if (!std::isfinite(linear_x) || !std::isfinite(linear_y)) {
+        linear_x = 0.0f;
+        linear_y = 0.0f;
+    }
+
+    if (command_subscriber_.TakeLatest(ros_command_))
+    {
+        ros_command_received_ = true;
+    }
+
+    if (ros_command_received_)
+    {
+        const auto age = std::chrono::steady_clock::now() - ros_command_.received_at;
+        if (ros_command_.received_at != std::chrono::steady_clock::time_point {} && age < std::chrono::milliseconds(100))
+        {
+            // 完整 PDO 原样下发，协议头、CRC 和速度有限性由 MCU 检查。
+            std::memcpy(&ecat_.OutputsRef(), ros_command_.data, sizeof(ros_command_.data));
+            const auto now = std::chrono::steady_clock::now();
+            if (!ros_command_active_ || now - last_ros_log_ >= std::chrono::seconds(1))
+            {
+                last_ros_log_ = now;
+                const auto* data = ros_command_.data;
+                const uint16_t received_crc = ReadUint16(data + 13);
+                const uint16_t calculated_crc = Crc16(data, 13);
+                DUST_LOG_INF("ecat: ROS command selected age_ms=%lld header=0x%02x crc=0x%04x calculated=0x%04x first_float=%02x %02x %02x %02x",
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(age).count()),
+                             static_cast<unsigned>(data[0]), static_cast<unsigned>(received_crc), static_cast<unsigned>(calculated_crc),
+                             static_cast<unsigned>(data[1]), static_cast<unsigned>(data[2]), static_cast<unsigned>(data[3]), static_cast<unsigned>(data[4]));
+            }
+            ros_command_active_ = true;
+            return;
+        }
+
+        if (ros_command_active_)
+        {
+            DUST_LOG_WRN("ecat: ROS command expired or invalid, sending zero velocity");
+        }
+        ros_command_active_ = false;
+
+        // ROS 接管后停更不回退到 var，组装合法零速度包。
+        linear_x = 0.0f;
+        linear_y = 0.0f;
+    }
+
+    auto& outputs = ecat_.OutputsRef();
+    outputs = {};
+    auto* data = reinterpret_cast<uint8_t*>(&outputs);
+    data[0] = 0x6B;
+    WriteFloat(data + 1, linear_x);
+    WriteFloat(data + 5, linear_y);
+    WriteFloat(data + 9, 0.0f);
+
+    const uint16_t crc = Crc16(data, 13);
+    data[13] = static_cast<uint8_t>(crc);
+    data[14] = static_cast<uint8_t>(crc >> 8);
+}
+
+/**
+ * @brief 校验 20 字节状态包，成功后才提交解析结果；不检查序号连续性
+ */
+static bool ParseStatus(const PdoInputs& inputs, StatusPacket& status)
+{
+    const auto* data = reinterpret_cast<const uint8_t*>(&inputs);
+
+    if (data[0] != 0x6D || ReadUint16(data + 18) != Crc16(data, 18)) {
+        return false;
+    }
+
+    status.sequence               = data[1];
+    status.game_type              = data[2];
+    status.stage_remain_s         = ReadUint16(data + 3);
+    status.game_progress          = data[5];
+    status.current_hp             = ReadUint16(data + 6);
+    status.maximum_hp             = ReadUint16(data + 8);
+    status.robot_id               = data[10];
+    status.chassis_power_enabled  = data[11];
+    status.zone_state_and_rfid    = ReadUint16(data + 12);
+    status.ally_control_degree    = ReadUint16(data + 14);
+    status.enemy_control_degree   = ReadUint16(data + 16);
+    return true;
+}
 
 /**
  * @brief 任务单拍：填输出、发一帧、收一帧
@@ -58,10 +232,7 @@ static init::Thread::TaskResult Task(void* context)
         return init::Thread::TaskResult::Retry;
     }
 
-    for (uint32_t i = 0; i < 8; ++i)
-    {
-        ecat_.OutputsRef().counter[i] = i;
-    }
+    UpdateCommand();
 
     if (!ecat_.Send())
     {
@@ -75,17 +246,40 @@ static init::Thread::TaskResult Task(void* context)
         return init::Thread::TaskResult::Retry;
     }
 
-    const PdoInputs& inputs  = ecat_.InputsRef();
-    const drivers::ethercat::SlaveInfo& slave = ecat_.Slave(1);
+	#if defined(CONFIG_DUST_TPC_ECAT_RX)
+	{
+		topic::ecat_rx::Message received {};
+		static_assert(sizeof(received.data) == sizeof(PdoInputs));
+		std::memcpy(received.data, &ecat_.InputsRef(), sizeof(received.data));
+		topic::ecat_rx::channel_.Publish(received);
+	}
+	#endif
+
+    StatusPacket status {};
+    const bool valid = ParseStatus(ecat_.InputsRef(), status);
+    if (!valid)
+    {
+        if (!status_invalid_) {
+            DUST_LOG_WRN("ecat: invalid status header or CRC");
+        }
+        status_invalid_ = true;
+        // 业务包错误不重建链路，继续收下一拍。
+        return init::Thread::TaskResult::Continue;
+    }
+    if (status_invalid_) {
+        DUST_LOG_OK("ecat: status packet valid again");
+    }
+    status_invalid_ = false;
 
     DUST_LOG_DBG("ethercat",
-                 "rx %08x %08x %08x %08x %08x %08x %08x %08x | wkc=%u/%u al_status=0x%04x al_code=0x%04x",
-                 inputs.counter[0], inputs.counter[1], inputs.counter[2], inputs.counter[3],
-                 inputs.counter[4], inputs.counter[5], inputs.counter[6], inputs.counter[7],
-                 static_cast<unsigned>(ecat_.LastWkc()),
-                 static_cast<unsigned>(ecat_.ExpectedWkc()),
-                 static_cast<unsigned>(slave.al_state),
-                 static_cast<unsigned>(slave.al_status));
+                 "seq=%u game_type=%u stage_remain_s=%u progress=%u hp=%u/%u robot_id=%u power=%u zone_rfid=0x%04x control=%u/%u wkc=%u/%u",
+                 static_cast<unsigned>(status.sequence), static_cast<unsigned>(status.game_type),
+                 static_cast<unsigned>(status.stage_remain_s), static_cast<unsigned>(status.game_progress),
+                 static_cast<unsigned>(status.current_hp), static_cast<unsigned>(status.maximum_hp),
+                 static_cast<unsigned>(status.robot_id), static_cast<unsigned>(status.chassis_power_enabled),
+                 static_cast<unsigned>(status.zone_state_and_rfid),
+                 static_cast<unsigned>(status.ally_control_degree), static_cast<unsigned>(status.enemy_control_degree),
+                 static_cast<unsigned>(ecat_.LastWkc()), static_cast<unsigned>(ecat_.ExpectedWkc()));
 
     return init::Thread::TaskResult::Continue;
 }
@@ -139,6 +333,7 @@ static RecoveryAction OnRetry(const std::exception& error, init::Thread& thread,
  */
 bool thread_init()
 {
+    UpdateCommand();
     while (!ecat_.Init({}))
     {
         DUST_LOG_ERR("ecat: init failed, retry in 10 ms");
@@ -185,6 +380,9 @@ void Release()
 {
     ecat_.Close();
 }
+
+REGISTER_SHELL_VAR("ecat.linear_x", linear_x_, command_mutex_);
+REGISTER_SHELL_VAR("ecat.linear_y", linear_y_, command_mutex_);
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, Release, "ethercat_init");
 REGISTER_THREAD(thread_start, MidThread, thread_stop, thread_join, "ethercat_start");

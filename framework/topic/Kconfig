@@ -3,3 +3,9 @@
 #
 # 骨架阶段只有通用通道模板（topic/channel.hpp），没有具体消息契约。
 # 新增契约时照 DUST_TPC_XXX_TO 命名，并在 topic/<name>/ 下定义 Message。
+
+config DUST_TPC_ECAT_RX
+    bool "EtherCAT raw PDO bridge topics"
+    default n
+    help
+      完整 256 字节 EtherCAT 双向 PDO 的进程内发布订阅契约。
