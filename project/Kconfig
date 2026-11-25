@@ -30,7 +30,7 @@ config USE_CMD_CONFIG
 
 config TRD_TEST
     bool "User test thread"
-    default y
+    default n
     help
       骨架自检线程：验证线程模板、日志、var 与注册段装配是否可用。
       不依赖任何外设。
@@ -53,7 +53,7 @@ config TRD_ETHERCAT
 
 config TRD_CHASSIS
     bool "Host-side chassis closed-loop control thread"
-    default y
+    default n
     depends on TRD_ETHERCAT
     help
       上位机四轮全向底盘速度环：遥控与电机反馈从 EtherCAT 线程的 topic 读取，
