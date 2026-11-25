@@ -20,7 +20,6 @@ target_include_directories(framework_core PUBLIC
 
 if(CONFIG_DUST_CMD_SHELL_LOG)
     target_sources(framework_core PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/log/log.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/log/process/log_process.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/log/transport/log_transport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/log/editor/log_editor.cpp)

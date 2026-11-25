@@ -2,8 +2,8 @@
  * @file log_transport.cpp
  * @author qingyu
  * @brief [④ 发送层] DUST_LOG 终端输出后端实现 — 写 stderr 并记录首次故障
- * @version 0.3
- * @date 2026-10-29
+ * @version 0.4
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -62,14 +62,6 @@ bool LogTransport::Write(const char* text, size_t size)
 bool LogTransport::Send(const TxFrame& frame)
 {
     return Write(frame.data.data(), std::strlen(frame.data.data()));
-}
-
-/**
- * @brief 获取首次后端错误，不经日志接口递归输出
- */
-int LogTransport::LastError() const
-{
-    return error_;
 }
 
 } // namespace debug

@@ -2,8 +2,8 @@
  * @file log_process.cpp
  * @author qingyu
  * @brief [② 加工层] DUST_LOG 加工层实现 — 日志入口 / 分频过滤 / 格式化 / 上色 / 帧包装
- * @version 0.1
- * @date 2026-10-29
+ * @version 0.2
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -415,15 +415,6 @@ void EndInput()
     {
         System_RequestStop(1);
     }
-}
-
-/**
- * @brief 当前是否已接管终端
- * @return true=原始终端模式已启用
- */
-bool EditingInput()
-{
-    return editor_.Editing();
 }
 
 } // namespace debug::logproc

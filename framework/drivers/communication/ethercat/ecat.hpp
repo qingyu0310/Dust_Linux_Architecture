@@ -2,8 +2,8 @@
  * @file ecat.hpp
  * @author qingyu
  * @brief EtherCAT 主站驱动 —— 建链、过程数据收发
- * @version 3.1
- * @date 2026-10-30
+ * @version 3.3
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -472,7 +472,20 @@ private:
     {
         auto* ctx = static_cast<ecx_contextt*>(link_.context);
 
+        // 临时诊断：BRD 读 TYPE 与 AL 状态，WKC=0 说明从站不响应寄存器读
+        uint16_t reg_type   = 0;
+        uint16_t reg_alstat = 0;
+        const int type_wkc   = ecx_BRD(&ctx->port, 0, ECT_REG_TYPE,   sizeof(reg_type),   &reg_type,   EC_TIMEOUTRET3);
+        const int alstat_wkc = ecx_BRD(&ctx->port, 0, ECT_REG_ALSTAT, sizeof(reg_alstat), &reg_alstat, EC_TIMEOUTRET3);
+
+        DUST_LOG_INF("ecat: probe BRD type wkc=%d value=0x%04x, alstat wkc=%d value=0x%04x",
+                     type_wkc, static_cast<unsigned>(etohs(reg_type)),
+                     alstat_wkc, static_cast<unsigned>(etohs(reg_alstat)));
+
         const int found = ecx_config_init(ctx);
+
+        DUST_LOG_INF("ecat: ecx_config_init returned %d, slavecount=%d", found, ctx->slavecount);
+
         if (found <= 0)
         {
             DUST_LOG_ERR("ecat: ecx_config_init found %d slaves", found);
@@ -587,6 +600,24 @@ private:
         auto* ctx = static_cast<ecx_contextt*>(link_.context);
 
         link_.io_map.assign(kIoMapBytes, 0);
+
+        // 临时诊断：CoE 标记与在线 PDO 映射（config_init 之后、config_map 之前）
+        if (ctx->slavecount >= 1)
+        {
+            const auto& probe = ctx->slavelist[1];
+
+            DUST_LOG_INF("ecat: slave 1 mbx_l=%u mbx_rl=%u mbx_proto=0x%04x CoE=%s",
+                         static_cast<unsigned>(probe.mbx_l), static_cast<unsigned>(probe.mbx_rl),
+                         static_cast<unsigned>(probe.mbx_proto),
+                         (probe.mbx_proto & ECT_MBXPROT_COE) != 0 ? "yes" : "no");
+
+            uint32_t   pdo_out  = 0;
+            uint32_t   pdo_in   = 0;
+            const int  pdo_ret  = ecx_readPDOmap(ctx, 1, &pdo_out, &pdo_in);
+
+            DUST_LOG_INF("ecat: readPDOmap ret=%d out=%u B in=%u B",
+                         pdo_ret, static_cast<unsigned>(pdo_out), static_cast<unsigned>(pdo_in));
+        }
 
         const int mapped = ecx_config_map_group(ctx, link_.io_map.data(), 0);
         DUST_LOG_INF("ecat: ecx_config_map_group mapped %d bytes (io_map %u bytes)", mapped, static_cast<unsigned>(link_.io_map.size()));

@@ -1,6 +1,9 @@
 # 构建产物（dust build / CMake）
 project/build/
 
+# Rust 构建产物（cargo）
+rust/target/
+
 # CMake 生成物（build/ 之外也可能出现）
 CMakeCache.txt
 CMakeFiles/

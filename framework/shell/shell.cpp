@@ -2,8 +2,8 @@
  * @file shell.cpp
  * @author qingyu
  * @brief Linux 调试台线程：poll 输入、日志泵和注册式启动
- * @version 0.1
- * @date 2026-10-12
+ * @version 0.2
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -393,8 +393,9 @@ static bool thread_start()
     
     thread_.SetWakeFd(Log::WakeFd());
     // shell 是日志唯一消费者与停机后的观察窗口：Recover 全杀时保留
-    thread_.Start(Task, std::chrono::milliseconds(0), &input_state_, "shell",
-                  ThreadFaultConfig{nullptr, nullptr, ThreadFaultPolicy::Recover, true});
+    thread_.Start(Task, std::chrono::milliseconds(0), &input_state_, "shell", ThreadFaultConfig{nullptr, nullptr, ThreadFaultPolicy::Recover, true});
+	
+    Log::MarkShellThreadReady();  // 首次运行即接管发送（重复置 true 无害）
 
     return true;
 }

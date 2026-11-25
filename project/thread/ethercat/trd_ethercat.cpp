@@ -1,9 +1,9 @@
 /**
  * @file trd_ethercat.cpp
  * @author qingyu
- * @brief EtherCAT 周期线程 —— 建链与过程数据收发
- * @version 3.2
- * @date 2026-10-30
+ * @brief EtherCAT 周期线程 —— 建链、上位机 PDO 协议 v1 双向收发与电机命令下发
+ * @version 4.5
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -12,210 +12,220 @@
 #include "Init_entry.hpp"
 #include "log.hpp"
 #include "thread.hpp"
-#include "var.hpp"
-#include <cmath>
+#include "pdo_layout.hpp"
+#include <chrono>
+#include <cstdint>
 #include <cstring>
-#include <limits>
+#include "framework/topic/ecat_chassis/ecat_chassis.hpp"
 #include "framework/drivers/communication/ethercat/ecat.hpp"
-
-#if defined(CONFIG_DUST_TPC_ECAT_RX)
-#include "framework/topic/ecat_rx/ecat_rx.hpp"
-
-namespace topic::ecat_rx
-{
-Channel<Message> channel_;
-}
-
-namespace topic::ecat_tx
-{
-Channel<Message> channel_;
-}
-#endif
 
 namespace thread::ethercat
 {
 
-// 保持从站映射：双向各 64 个 uint32_t，业务包从 PDO 首字节开始。
-struct PdoOutputs
-{
-    uint32_t counter[64];
-};
+using namespace drivers::ethercat;
+using namespace topic;
 
-struct PdoInputs
-{
-    uint32_t counter[64];
-};
-
-static_assert(sizeof(PdoOutputs) == 256, "RxPDO must be 256 bytes");
-static_assert(sizeof(PdoInputs) == 256, "TxPDO must be 256 bytes");
-static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,"Velocity requires IEEE 754 float32");
-
-/**
- * @brief MCU 状态包解析结果；当前业务字段为占位值，不代表真实裁判数据
- */
-struct StatusPacket
-{
-    uint8_t  sequence;
-    uint8_t  game_type;
-    uint16_t stage_remain_s;
-    uint8_t  game_progress;
-    uint16_t current_hp;
-    uint16_t maximum_hp;
-    uint8_t  robot_id;
-    uint8_t  chassis_power_enabled;
-    uint16_t zone_state_and_rfid;
-    uint16_t ally_control_degree;
-    uint16_t enemy_control_degree;
-};
-
-static drivers::ethercat::Ecat<PdoOutputs, PdoInputs> ecat_ {};
+static Ecat<PdoOutputs, PdoInputs> ecat_ {};
 static init::Thread thread_ {};
-static std::mutex   command_mutex_;
-static float linear_x_ = 0.0f;       // 前向速度 m/s，向前为正
-static float linear_y_ = 0.0f;       // 横向速度 m/s，向左为正
-static bool  status_invalid_ = false;
-
-static topic::Subscriber<topic::ecat_tx::Message> command_subscriber_ {topic::ecat_tx::channel_};
-static topic::ecat_tx::Message ros_command_ {};
-static bool ros_command_received_ = false;
-static bool ros_command_active_ = false;                			// ROS 命令正在下发
-static std::chrono::steady_clock::time_point last_ros_log_ {}; 		// 下发日志限频
 
 /**
- * @brief 命令包与状态包共用 CRC16：初值 0xFFFF，右移多项式 0x8408，无最终异或
+ * @brief 主站配置：固定挂在从站上的网口，避免自动选中另一块没有从站的 i225 口
+ * @return 主站配置
  */
-static uint16_t Crc16(const uint8_t* data, size_t size)
+static Config MainConfig()
 {
-    uint16_t crc = 0xFFFF;
+    Config config;
 
-    for (size_t i = 0; i < size; ++i) {
-        crc ^= data[i];
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
-        }
-    }
+    config.interface_name = "enp2s0";
 
-    return crc;
+    return config;
 }
 
-/**
- * @brief 从未对齐的协议字节读取小端 uint16_t
- */
-static uint16_t ReadUint16(const uint8_t* data)
-{
-    return static_cast<uint16_t>(data[0] | (static_cast<uint16_t>(data[1]) << 8));
-}
+static Subscriber<ecat_chassis::ChassisCommandMessage> chassis_command_sub_ {ecat_chassis::chassis_command_channel_};  // 底盘命令订阅者
+static ecat_chassis::ChassisCommandMessage   chassis_command_    {};        // 最近一次底盘命令
+static std::chrono::steady_clock::time_point chassis_command_at_ {};  		// 最近一次命令接收时刻
+
+static bool     chassis_command_received_ = false;  						// 是否收到过底盘命令
+static bool     chassis_command_active_   = false;  						// 底盘命令当前是否在生效
+constexpr auto  kChassisCommandTimeout = std::chrono::milliseconds(100);  // 命令停更超时
+
+static uint16_t host_session_     = 0;      // 当前主机会话号；0=未建立
+static uint16_t session_counter_  = 0;      // 会话号递增源
+static uint32_t command_seq_      = 0;      // 新决策计数
+static uint32_t boot_id_          = 0;      // 最近有效反馈的 mcu_boot_id
+static uint32_t last_feedback_seq_ = 0;     // 最近有效反馈的 feedback_seq
+static bool     have_boot_id_     = false;  // 是否已读到过有效反馈
+static bool     feedback_invalid_ = false;  // 上一帧反馈是否校验失败
+static bool     session_accepted_ = false;  // 从站是否已接纳当前会话
 
 /**
- * @brief 将 float 的 IEEE 754 位模式按小端写入，不做数值转整数
+ * @brief 校验 TxPDO 头并维护会话状态；boot id 变化按从站重启处理
+ *
+ * 校验失败只标记本帧无效，不打断链路；从站重启后重新生成会话号，
+ * 下一次组帧时把新的 boot id 回显出去。
+ *
+ * @param inputs 从站反馈镜像
+ * @return true=本帧通过 magic 与版本校验
  */
-static void WriteFloat(uint8_t* data, float value)
+static bool ParseFeedback(const PdoInputs& inputs)
 {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
+    const auto& header = inputs.header;
 
-    for (unsigned i = 0; i < sizeof(bits); ++i) {
-        data[i] = static_cast<uint8_t>(bits >> (8 * i));
-    }
-}
-
-/**
- * @brief 快照 var 速度并组装 15 字节命令，其余 PDO 清零；当前角速度固定为零
- */
-static void UpdateCommand()
-{
-    float linear_x = 0.0f;
-    float linear_y = 0.0f;
+    if (header.magic != kFeedbackMagic || header.proto_major != kProtoMajor)
     {
-        std::lock_guard<std::mutex> lock(command_mutex_);
-        linear_x = linear_x_;
-        linear_y = linear_y_;
-    }
-
-    if (!std::isfinite(linear_x) || !std::isfinite(linear_y)) {
-        linear_x = 0.0f;
-        linear_y = 0.0f;
-    }
-
-    if (command_subscriber_.TakeLatest(ros_command_))
-    {
-        ros_command_received_ = true;
-    }
-
-    if (ros_command_received_)
-    {
-        const auto age = std::chrono::steady_clock::now() - ros_command_.received_at;
-        if (ros_command_.received_at != std::chrono::steady_clock::time_point {} && age < std::chrono::milliseconds(100))
+        if (!feedback_invalid_)
         {
-            // 完整 PDO 原样下发，协议头、CRC 和速度有限性由 MCU 检查。
-            std::memcpy(&ecat_.OutputsRef(), ros_command_.data, sizeof(ros_command_.data));
-            const auto now = std::chrono::steady_clock::now();
-            if (!ros_command_active_ || now - last_ros_log_ >= std::chrono::seconds(1))
-            {
-                last_ros_log_ = now;
-                const auto* data = ros_command_.data;
-                const uint16_t received_crc = ReadUint16(data + 13);
-                const uint16_t calculated_crc = Crc16(data, 13);
-                DUST_LOG_INF("ecat: ROS command selected age_ms=%lld header=0x%02x crc=0x%04x calculated=0x%04x first_float=%02x %02x %02x %02x",
-                             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(age).count()),
-                             static_cast<unsigned>(data[0]), static_cast<unsigned>(received_crc), static_cast<unsigned>(calculated_crc),
-                             static_cast<unsigned>(data[1]), static_cast<unsigned>(data[2]), static_cast<unsigned>(data[3]), static_cast<unsigned>(data[4]));
-            }
-            ros_command_active_ = true;
-            return;
+            DUST_LOG_WRN("ecat: feedback rejected magic=0x%08x expected=0x%08x proto=%u.%u",
+                         static_cast<unsigned>(header.magic), static_cast<unsigned>(kFeedbackMagic),
+                         static_cast<unsigned>(header.proto_major), static_cast<unsigned>(header.proto_minor));
         }
-
-        if (ros_command_active_)
-        {
-            DUST_LOG_WRN("ecat: ROS command expired or invalid, sending zero velocity");
-        }
-        ros_command_active_ = false;
-
-        // ROS 接管后停更不回退到 var，组装合法零速度包。
-        linear_x = 0.0f;
-        linear_y = 0.0f;
-    }
-
-    auto& outputs = ecat_.OutputsRef();
-    outputs = {};
-    auto* data = reinterpret_cast<uint8_t*>(&outputs);
-    data[0] = 0x6B;
-    WriteFloat(data + 1, linear_x);
-    WriteFloat(data + 5, linear_y);
-    WriteFloat(data + 9, 0.0f);
-
-    const uint16_t crc = Crc16(data, 13);
-    data[13] = static_cast<uint8_t>(crc);
-    data[14] = static_cast<uint8_t>(crc >> 8);
-}
-
-/**
- * @brief 校验 20 字节状态包，成功后才提交解析结果；不检查序号连续性
- */
-static bool ParseStatus(const PdoInputs& inputs, StatusPacket& status)
-{
-    const auto* data = reinterpret_cast<const uint8_t*>(&inputs);
-
-    if (data[0] != 0x6D || ReadUint16(data + 18) != Crc16(data, 18)) {
+        feedback_invalid_ = true;
         return false;
     }
+    if (feedback_invalid_)
+    {
+        DUST_LOG_OK("ecat: feedback valid again magic=0x%08x proto=%u.%u",
+                    static_cast<unsigned>(header.magic),
+                    static_cast<unsigned>(header.proto_major), static_cast<unsigned>(header.proto_minor));
+    }
+    feedback_invalid_ = false;
 
-    status.sequence               = data[1];
-    status.game_type              = data[2];
-    status.stage_remain_s         = ReadUint16(data + 3);
-    status.game_progress          = data[5];
-    status.current_hp             = ReadUint16(data + 6);
-    status.maximum_hp             = ReadUint16(data + 8);
-    status.robot_id               = data[10];
-    status.chassis_power_enabled  = data[11];
-    status.zone_state_and_rfid    = ReadUint16(data + 12);
-    status.ally_control_degree    = ReadUint16(data + 14);
-    status.enemy_control_degree   = ReadUint16(data + 16);
+    if (!have_boot_id_ || header.mcu_boot_id != boot_id_)
+    {
+        if (have_boot_id_)
+        {
+            DUST_LOG_WRN("ecat: slave restarted boot=0x%08x -> 0x%08x",
+                         static_cast<unsigned>(boot_id_), static_cast<unsigned>(header.mcu_boot_id));
+        }
+        have_boot_id_ = true;
+        boot_id_ = header.mcu_boot_id;
+
+        // 新 boot id 视为新决策：换会话号并让 command_seq 前进一次
+        ++session_counter_;
+        host_session_ = (session_counter_ == 0) ? 1 : session_counter_;
+        ++command_seq_;
+        session_accepted_ = false;
+
+        DUST_LOG_INF("ecat: new host session=%u boot=0x%08x command_seq=%u",
+                     static_cast<unsigned>(host_session_), static_cast<unsigned>(boot_id_),
+                     static_cast<unsigned>(command_seq_));
+    }
+
+    last_feedback_seq_ = header.feedback_seq;
+
+    const bool accepted = header.accepted_host_session == host_session_ && (header.status_flags & 0x0001u) != 0;
+    if (accepted != session_accepted_)
+    {
+        session_accepted_ = accepted;
+        if (accepted)
+        {
+            DUST_LOG_OK("ecat: session %u accepted", static_cast<unsigned>(host_session_));
+        }
+        else
+        {
+            DUST_LOG_WRN("ecat: session %u not accepted accepted_session=%u status_flags=0x%04x",
+                         static_cast<unsigned>(host_session_), static_cast<unsigned>(header.accepted_host_session),
+                         static_cast<unsigned>(header.status_flags));
+        }
+    }
+
     return true;
 }
 
 /**
- * @brief 任务单拍：填输出、发一帧、收一帧
+ * @brief 取最新底盘命令写入 RxPDO 电机区；停更 100 ms 归零
+ *
+ * 只写 C620 电流帧的 8 B 数据段，电机区其余字节保持 outputs = {} 的清零状态。
+ *
+ * @param area RxPDO 电机命令区（128 B）
+ */
+static void UpdateChassisCommand(uint8_t* area)
+{
+    ecat_chassis::ChassisCommandMessage message {};
+	
+    if (chassis_command_sub_.TakeLatest(message))
+    {
+        chassis_command_ = message;
+        chassis_command_at_ = std::chrono::steady_clock::now();
+        chassis_command_received_ = true;
+    }
+
+    const bool fresh = chassis_command_received_ && (std::chrono::steady_clock::now() - chassis_command_at_) < kChassisCommandTimeout;
+
+    if (fresh)
+    {
+        std::memcpy(area, chassis_command_.data, sizeof(chassis_command_.data));
+    }
+
+    if (fresh != chassis_command_active_)
+    {
+        chassis_command_active_ = fresh;
+        if (fresh)
+        {
+            DUST_LOG_INF("ecat: motor command active");
+        }
+        else
+        {
+            DUST_LOG_WRN("ecat: motor command expired, motor area zeroed");
+        }
+    }
+}
+
+/**
+ * @brief 按协议 v1 组一帧 RxPDO：命令头 + 电机命令区，其余预留区保持全零
+ *
+ * 组帧耗时用 steady_clock 实测后写入 compute_time_us，供从站侧诊断。
+ */
+static void UpdateCommand()
+{
+    auto& outputs = ecat_.OutputsRef();
+    outputs = {};
+
+    const auto begin = std::chrono::steady_clock::now();
+
+    auto& header = outputs.header;
+
+    header.magic 	  		 = kCommandMagic;
+    header.proto_major		 = kProtoMajor;
+    header.proto_minor 		 = kProtoMinor;
+    header.byte_length       = kPdoBytes;
+    header.slot_map_version  = kSlotMapVersion;
+    header.host_session 	 = host_session_;
+    header.command_seq  	 = command_seq_;
+    header.mcu_boot_id_echo  = boot_id_;
+    header.feedback_seq_echo = last_feedback_seq_;
+    header.lease_us 		 = kLeaseUs;
+    header.flags			 = 0;
+
+    UpdateChassisCommand(outputs.motor_command);
+
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count();
+    header.compute_time_us = static_cast<uint32_t>(elapsed_us);
+}
+
+/**
+ * @brief 把本拍电机反馈与遥控状态发布给控制线程
+ * @param inputs 从站反馈镜像
+ */
+static void PublishFeedback(const PdoInputs& inputs)
+{
+    ecat_chassis::ChassisFeedbackMessage feedback {};
+    std::memcpy(feedback.slot, inputs.motor_feedback, sizeof(feedback.slot));
+    ecat_chassis::chassis_feedback_channel_.Publish(feedback);
+
+    ecat_chassis::ChassisRemoteMessage remote {};
+    std::memcpy(remote.axis, inputs.remote.axis, sizeof(remote.axis));
+
+    remote.controls   = inputs.remote.controls;
+    remote.source_seq = inputs.remote.source_seq;
+    remote.status 	  = inputs.remote.status;
+    remote.sample_tick_us = inputs.remote.sample_tick_us;
+
+    ecat_chassis::chassis_remote_channel_.Publish(remote);
+}
+
+/**
+ * @brief 任务单拍：填输出、发一帧、收一帧、解析反馈
  *
  * 只走正常路径，失败一律返回 Retry，处置交给 OnRetry。
  *
@@ -246,39 +256,35 @@ static init::Thread::TaskResult Task(void* context)
         return init::Thread::TaskResult::Retry;
     }
 
-	#if defined(CONFIG_DUST_TPC_ECAT_RX)
-	{
-		topic::ecat_rx::Message received {};
-		static_assert(sizeof(received.data) == sizeof(PdoInputs));
-		std::memcpy(received.data, &ecat_.InputsRef(), sizeof(received.data));
-		topic::ecat_rx::channel_.Publish(received);
-	}
-	#endif
-
-    StatusPacket status {};
-    const bool valid = ParseStatus(ecat_.InputsRef(), status);
-    if (!valid)
+    const PdoInputs& inputs = ecat_.InputsRef();
+    if (!ParseFeedback(inputs))
     {
-        if (!status_invalid_) {
-            DUST_LOG_WRN("ecat: invalid status header or CRC");
-        }
-        status_invalid_ = true;
         // 业务包错误不重建链路，继续收下一拍。
         return init::Thread::TaskResult::Continue;
     }
-    if (status_invalid_) {
-        DUST_LOG_OK("ecat: status packet valid again");
-    }
-    status_invalid_ = false;
+
+    const auto& header = inputs.header;
+    const auto& remote = inputs.remote;
+    const auto& imu    = inputs.imu;
+
+    PublishFeedback(inputs);
 
     DUST_LOG_DBG("ethercat",
-                 "seq=%u game_type=%u stage_remain_s=%u progress=%u hp=%u/%u robot_id=%u power=%u zone_rfid=0x%04x control=%u/%u wkc=%u/%u",
-                 static_cast<unsigned>(status.sequence), static_cast<unsigned>(status.game_type),
-                 static_cast<unsigned>(status.stage_remain_s), static_cast<unsigned>(status.game_progress),
-                 static_cast<unsigned>(status.current_hp), static_cast<unsigned>(status.maximum_hp),
-                 static_cast<unsigned>(status.robot_id), static_cast<unsigned>(status.chassis_power_enabled),
-                 static_cast<unsigned>(status.zone_state_and_rfid),
-                 static_cast<unsigned>(status.ally_control_degree), static_cast<unsigned>(status.enemy_control_degree),
+                 "seq=%u tick_us=%u boot=0x%08x applied=%u session=%u accepted=%u status=0x%04x "
+                 "remote=%u axis=%.3f/%.3f/%.3f/%.3f ctrl=0x%04x "
+                 "imu=%u quat=%.3f/%.3f/%.3f/%.3f gyro=%.2f/%.2f/%.2f wkc=%u/%u",
+                 static_cast<unsigned>(header.feedback_seq), static_cast<unsigned>(header.mcu_tick_us),
+                 static_cast<unsigned>(header.mcu_boot_id), static_cast<unsigned>(header.applied_command_seq),
+                 static_cast<unsigned>(host_session_), static_cast<unsigned>(header.accepted_host_session),
+                 static_cast<unsigned>(header.status_flags),
+                 static_cast<unsigned>(remote.source_seq),
+                 static_cast<double>(remote.axis[0]), static_cast<double>(remote.axis[1]),
+                 static_cast<double>(remote.axis[2]), static_cast<double>(remote.axis[3]),
+                 static_cast<unsigned>(remote.controls),
+                 static_cast<unsigned>(imu.source_seq),
+                 static_cast<double>(imu.quaternion[0]), static_cast<double>(imu.quaternion[1]),
+                 static_cast<double>(imu.quaternion[2]), static_cast<double>(imu.quaternion[3]),
+                 static_cast<double>(imu.gyro[0]), static_cast<double>(imu.gyro[1]), static_cast<double>(imu.gyro[2]),
                  static_cast<unsigned>(ecat_.LastWkc()), static_cast<unsigned>(ecat_.ExpectedWkc()));
 
     return init::Thread::TaskResult::Continue;
@@ -313,7 +319,7 @@ static RecoveryAction OnRetry(const std::exception& error, init::Thread& thread,
 
     try
     {
-        if (!ecat_.Init({}))
+        if (!ecat_.Init(MainConfig()))
         {
             DUST_LOG_ERR("ecat: bring-up failed on %s", ecat_.InterfaceName().c_str());
         }
@@ -333,10 +339,9 @@ static RecoveryAction OnRetry(const std::exception& error, init::Thread& thread,
  */
 bool thread_init()
 {
-    UpdateCommand();
-    while (!ecat_.Init({}))
+    while (!ecat_.Init(MainConfig()))
     {
-        DUST_LOG_ERR("ecat: init failed, retry in 10 ms");
+        DUST_LOG_ERR("ecat: init failed, retry in 1000 ms");
         std::this_thread::sleep_for(DUST_MSEC(1000));
     }
 
@@ -380,9 +385,6 @@ void Release()
 {
     ecat_.Close();
 }
-
-REGISTER_SHELL_VAR("ecat.linear_x", linear_x_, command_mutex_);
-REGISTER_SHELL_VAR("ecat.linear_y", linear_y_, command_mutex_);
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, Release, "ethercat_init");
 REGISTER_THREAD(thread_start, MidThread, thread_stop, thread_join, "ethercat_start");

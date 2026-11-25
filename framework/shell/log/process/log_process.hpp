@@ -2,8 +2,8 @@
  * @file log_process.hpp
  * @author qingyu
  * @brief [② 加工层] DUST_LOG 加工 — 日志入口 / 分频过滤 / 格式化 / 上色 / 帧包装
- * @version 0.1
- * @date 2026-10-29
+ * @version 0.2
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -189,10 +189,5 @@ void CommitInput();
  * @brief 关闭调试台时恢复终端属性
  */
 void EndInput();
-
-/**
- * @brief 当前是否已接管终端（供 shell 判断要不要重绘）
- */
-bool EditingInput();
 
 } // namespace debug::logproc

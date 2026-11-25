@@ -49,11 +49,24 @@ config TRD_ETHERCAT
 
 # ============================================================================
 
+# =================              TRD_CHASSIS              ====================
+
+config TRD_CHASSIS
+    bool "Host-side chassis closed-loop control thread"
+    default y
+    depends on TRD_ETHERCAT
+    help
+      上位机四轮全向底盘速度环：遥控与电机反馈从 EtherCAT 线程的 topic 读取，
+      算出四轮电流后经 topic 交给 EtherCAT 线程写入 RxPDO 电机命令区。
+      PDO 电机区布局见 doc/上位机PDO协议说明-2026-11-25.md。
+
+# ============================================================================
+
 # =================               TRD_ROS2               =====================
 
 config TRD_ROS2
     bool "ROS 2 EtherCAT PDO forwarding thread"
-    default y
+    default n
     depends on TRD_ETHERCAT
     select DUST_TPC_ECAT_RX
     help

@@ -2,8 +2,8 @@
  * @file log_transport.hpp
  * @author qingyu
  * @brief [④ 发送层] DUST_LOG 终端输出后端 — 只负责把字节写到 stderr
- * @version 0.3
- * @date 2026-10-29
+ * @version 0.4
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -37,7 +37,6 @@ public:
     bool SupportsColor() const;         // stderr 是否为终端
     bool Send(const TxFrame& frame);    // 输出一帧日志
     bool Write(const char* text, size_t size);  // 输出裸字节（供编辑层重绘）
-    int  LastError() const;             // 首次发送失败的 errno
 
 private:
     int error_ = 0;                     // 0=正常；非零=首次后端故障

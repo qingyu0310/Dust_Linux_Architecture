@@ -16,6 +16,11 @@ if(CONFIG_TRD_ETHERCAT)
     target_include_directories(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ethercat)
 endif()
 
+if(CONFIG_TRD_CHASSIS)
+    target_sources(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/chassis/trd_chassis.cpp)
+    target_include_directories(dust_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/chassis)
+endif()
+
 if(CONFIG_TRD_ROS2)
     find_package(rclcpp REQUIRED)
     find_package(std_msgs REQUIRED)

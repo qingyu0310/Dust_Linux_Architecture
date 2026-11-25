@@ -3,8 +3,8 @@
  * @author qingyu
  * @brief [终端编辑层] 命令行的显示与重绘 — 与日志输出串行共用同一终端
  *
- * @version 0.1
- * @date 2026-10-29
+ * @version 0.2
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -67,11 +67,6 @@ public:
      * @return true 成功
      */
     bool Draw();
-
-    /**
-     * @brief 是否已接管终端（决定加工层要不要调 Clear/Draw）
-     */
-    bool Editing() const { return editing_; }
 
     /**
      * @brief 启用原始终端模式，关闭内核回显与整行输入，保留信号按键

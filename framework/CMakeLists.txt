@@ -11,13 +11,14 @@ find_package(yaml-cpp REQUIRED)
 
 # ============================================================================
 #
-# algorithm：算法能力（纯头文件能力）
+# algorithm：算法能力（头文件 + PID 控制器实现）
 #
 # ============================================================================
 
-add_library(framework_algorithm INTERFACE)
-target_include_directories(framework_algorithm INTERFACE ${PROJECT_SOURCE_DIR})
-target_link_libraries(framework_algorithm INTERFACE Eigen3::Eigen)
+add_library(framework_algorithm STATIC
+    algorithm/controller/pid/pid.cpp)
+target_include_directories(framework_algorithm PUBLIC ${PROJECT_SOURCE_DIR})
+target_link_libraries(framework_algorithm PUBLIC Eigen3::Eigen)
 
 # ============================================================================
 #

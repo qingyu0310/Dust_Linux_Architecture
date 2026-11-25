@@ -149,9 +149,9 @@ private:
     }
 
     std::array<LogEntry, kMaxLogEntries> entries_{};
-    size_t count_ = 0;
+    size_t    count_ = 0;
     LogEntry* active_ = nullptr;
-    uint64_t epoch_ = 0;
+    uint64_t  epoch_ = 0;
 };
 
 } // namespace debug

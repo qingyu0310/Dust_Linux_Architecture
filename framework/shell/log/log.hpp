@@ -2,8 +2,8 @@
  * @file log.hpp
  * @author qingyu
  * @brief [门面] DUST_LOG 组装层 — 四层串接 + 对外宏与装配入口
- * @version 0.3
- * @date 2026-10-29
+ * @version 0.4
+ * @date 2026-11-25
  *
  * @copyright Copyright (c) 2026
  *
@@ -51,7 +51,7 @@ public:
      * @brief 初始化：重置加工层持有的四层实例
      * @return true 初始化成功
      */
-    static bool Init();
+    static bool Init() { return logproc::Init(); }
 
     /**
      * @brief 标记 shell 线程已接管发送
@@ -68,43 +68,6 @@ public:
      * @param text 响应文本
      */
     static void SendCommandLine(const char* text) { logproc::CommandLine(text); }
-
-    /**
-     * @brief log 命令入口（转发到 ① 命令层）
-     * @param line 子命令参数（不含 "log" 前缀）
-     */
-    static void ProcessLogCommand(uint8_t* line);
-
-    /**
-     * @brief DBG 流式打印：仅当前选中条目输出，形态取条目标志
-     * @param entry DBG 条目
-     * @param fmt   格式化串
-     */
-    static void PrintSelectedDebug(LogEntry* entry, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
-
-    /**
-     * @brief 一次性日志，黑色
-     * @param fmt 格式化串
-     */
-    static void PrintInfo(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-
-    /**
-     * @brief 一次性日志，红色
-     * @param fmt 格式化串
-     */
-    static void PrintError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-
-    /**
-     * @brief 一次性日志，绿色（状态正常）
-     * @param fmt 格式化串
-     */
-    static void PrintOk(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-
-    /**
-     * @brief 一次性日志，橘色
-     * @param fmt 格式化串
-     */
-    static void PrintWarning(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
     /**
      * @brief 接管同一终端的命令回显（终端编辑层）；重定向时不启用
