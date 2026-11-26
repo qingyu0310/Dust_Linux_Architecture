@@ -2,7 +2,7 @@
  * @file trd_ethercat.cpp
  * @author qingyu
  * @brief EtherCAT 周期线程 —— 建链、上位机 PDO 协议 v1 双向收发与电机命令下发
- * @version 4.7
+ * @version 4.8
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -121,33 +121,17 @@ static bool ParseFeedback(const PdoInputs& inputs)
 }
 
 /**
- * @brief 按协议 v1 组一帧 RxPDO：命令头 + 电机命令区，其余预留区保持全零
- *
- * 组帧耗时用 steady_clock 实测后写入 compute_time_us，供从站侧诊断。
+ * @brief 按协议 v1 组一帧 RxPDO：256 字节按 0~255 顺序填充
  */
 static void UpdateCommand()
 {
     auto& outputs = ecat_.OutputsRef();
     outputs = {};
 
-    const auto begin = std::chrono::steady_clock::now();
-
-    auto& header = outputs.header;
-
-    header.magic 	  		 = kCommandMagic;
-    header.proto_major		 = kProtoMajor;
-    header.proto_minor 		 = kProtoMinor;
-    header.byte_length       = kPdoBytes;
-    header.slot_map_version  = kSlotMapVersion;
-    header.host_session 	 = host_session_;
-    header.command_seq  	 = command_seq_;
-    header.mcu_boot_id_echo  = boot_id_;
-    header.feedback_seq_echo = last_feedback_seq_;
-    header.lease_us 		 = kLeaseUs;
-    header.flags			 = 0;
-
-    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count();
-    header.compute_time_us = static_cast<uint32_t>(elapsed_us);
+    for (uint32_t i = 0; i < sizeof(outputs.data); ++i)
+    {
+        outputs.data[i] = static_cast<uint8_t>(i);
+    }
 }
 
 /**

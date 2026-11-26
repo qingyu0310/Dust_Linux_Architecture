@@ -2,7 +2,7 @@
  * @file pdo_layout.hpp
  * @author qingyu
  * @brief 上位机 PDO 协议 v1 布局 —— RxPDO / TxPDO 各 256 B packed 结构
- * @version 0.3
+ * @version 0.5
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -76,10 +76,10 @@ struct ImuFeedback
  */
 struct PdoInputs
 {
-    FeedbackHeader header;           // 偏移 0
-    RemoteFeedback remote;           // 偏移 40
-    ImuFeedback    imu;              // 偏移 72
-    uint8_t        motor_feedback[128];  // 偏移 128，本版全零
+    FeedbackHeader header;           		// 偏移 0
+    RemoteFeedback remote;           		// 偏移 40
+    ImuFeedback    imu;              		// 偏移 72
+    uint8_t        motor_feedback[128];  	// 偏移 128，本版全零
 };
 
 /**
@@ -105,15 +105,11 @@ struct CommandHeader
 };
 
 /**
- * @brief RxPDO：主站 → 从站，256 B
+ * @brief RxPDO：上位机 → 下位机，256 B
  */
 struct PdoOutputs
 {
-    CommandHeader header;            // 偏移 0
-    uint8_t       motor_command[128];    // 偏移 48，前 8 B = C620 电流帧（CAN 0x200），其余全零
-    uint8_t       device_operation[32];  // 偏移 176，本版写零
-    uint8_t       diagnostic[16];        // 偏移 208，暂未处理
-    uint8_t       reserved[32];          // 偏移 224，必须全零
+    uint8_t data[256];                   // 完整下行帧，按协议 v1 逐字节布局
 };
 
 #pragma pack(pop)
