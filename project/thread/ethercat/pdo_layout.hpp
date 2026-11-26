@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -22,7 +23,7 @@ namespace thread::ethercat
 #pragma pack(push, 1)
 
 /**
- * @brief TxPDO 反馈头（偏移 0，40 B）
+ * @brief TxPDO 反馈头（偏移 0，34 B）
  */
 struct FeedbackHeader
 {
@@ -39,11 +40,10 @@ struct FeedbackHeader
     uint16_t fault_code;             // 故障码；0=正常
     uint8_t  armed_mask;             // 本版恒 0
     uint8_t  can_health;             // 本版恒 0
-    uint8_t  reserved[6];            // 全零
 };
 
 /**
- * @brief 遥控反馈（偏移 40，32 B）
+ * @brief 遥控反馈（偏移 34，28 B）
  */
 struct RemoteFeedback
 {
@@ -53,11 +53,10 @@ struct RemoteFeedback
     uint16_t controls;               // 开关位：bit0 总开关，bit1 Spin，bit2~bit10 其余开关
     uint8_t  protocol;               // 0=未报告
     uint8_t  status;                 // bit0=已收到过有效遥控帧
-    uint8_t  reserved[4];            // 全零
 };
 
 /**
- * @brief IMU 反馈（偏移 72，56 B）
+ * @brief IMU 反馈（偏移 62，50 B）
  */
 struct ImuFeedback
 {
@@ -66,9 +65,7 @@ struct ImuFeedback
     float    quaternion[4];          // w, x, y, z
     float    gyro[3];                // rad/s
     float    accel[3];               // m/s²
-    float    temperature;            // ℃
     uint16_t flags;                  // bit0=已产生过姿态
-    uint8_t  reserved[2];            // 全零
 };
 
 /**
@@ -76,14 +73,14 @@ struct ImuFeedback
  */
 struct PdoInputs
 {
-    FeedbackHeader header;           		// 偏移 0
-    RemoteFeedback remote;           		// 偏移 40
-    ImuFeedback    imu;              		// 偏移 72
-    uint8_t        motor_feedback[128];  	// 偏移 128，本版全零
+    FeedbackHeader header;           // 偏移 0
+    RemoteFeedback remote;           // 偏移 34
+    ImuFeedback    imu;              // 偏移 62
+    uint8_t        padding[144];     // 偏移 112，本版全零
 };
 
 /**
- * @brief RxPDO 命令头（偏移 0，48 B）
+ * @brief RxPDO 命令头（偏移 0，38 B）
  */
 struct CommandHeader
 {
@@ -93,7 +90,6 @@ struct CommandHeader
     uint16_t byte_length;            // 必须 256
     uint16_t slot_map_version;       // 必须 1
     uint16_t host_session;           // 主机会话号，会话生命周期内不变
-    uint16_t reserved0;              // 0
     uint32_t command_seq;            // 只有产生新决策时才自增
     uint32_t mcu_boot_id_echo;       // 回显最近一次 TxPDO 的 mcu_boot_id
     uint32_t feedback_seq_echo;      // 本命令依据的 feedback_seq
@@ -101,7 +97,6 @@ struct CommandHeader
     uint32_t compute_time_us;        // 主站组帧耗时，诊断用
     uint16_t flags;                  // bit0 请求 arm；bit1 请求 disarm
     uint16_t enable_mask;            // 本版忽略
-    uint8_t  reserved[8];            // 全零
 };
 
 /**
@@ -114,12 +109,14 @@ struct PdoOutputs
 
 #pragma pack(pop)
 
-static_assert(sizeof(FeedbackHeader) == 40, "FeedbackHeader must be 40 bytes");
-static_assert(sizeof(RemoteFeedback) == 32, "RemoteFeedback must be 32 bytes");
-static_assert(sizeof(ImuFeedback)    == 56, "ImuFeedback must be 56 bytes");
-static_assert(sizeof(CommandHeader)  == 48, "CommandHeader must be 48 bytes");
+static_assert(sizeof(FeedbackHeader) == 34, "FeedbackHeader must be 34 bytes");
+static_assert(sizeof(RemoteFeedback) == 28, "RemoteFeedback must be 28 bytes");
+static_assert(sizeof(ImuFeedback)    == 50, "ImuFeedback must be 50 bytes");
+static_assert(sizeof(CommandHeader)  == 38, "CommandHeader must be 38 bytes");
 static_assert(sizeof(PdoInputs)      == 256, "TxPDO must be 256 bytes");
 static_assert(sizeof(PdoOutputs)     == 256, "RxPDO must be 256 bytes");
+static_assert(offsetof(PdoInputs, remote) == 34, "RemoteFeedback must start at 34");
+static_assert(offsetof(PdoInputs, imu)    == 62, "ImuFeedback must start at 62");
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559, "PDO requires IEEE 754 binary32");
 
 constexpr uint32_t kFeedbackMagic  = 0x31424450;  // "PDB1"，小端读为 50 44 42 31
