@@ -601,24 +601,6 @@ private:
 
         link_.io_map.assign(kIoMapBytes, 0);
 
-        // 临时诊断：CoE 标记与在线 PDO 映射（config_init 之后、config_map 之前）
-        if (ctx->slavecount >= 1)
-        {
-            const auto& probe = ctx->slavelist[1];
-
-            DUST_LOG_INF("ecat: slave 1 mbx_l=%u mbx_rl=%u mbx_proto=0x%04x CoE=%s",
-                         static_cast<unsigned>(probe.mbx_l), static_cast<unsigned>(probe.mbx_rl),
-                         static_cast<unsigned>(probe.mbx_proto),
-                         (probe.mbx_proto & ECT_MBXPROT_COE) != 0 ? "yes" : "no");
-
-            uint32_t   pdo_out  = 0;
-            uint32_t   pdo_in   = 0;
-            const int  pdo_ret  = ecx_readPDOmap(ctx, 1, &pdo_out, &pdo_in);
-
-            DUST_LOG_INF("ecat: readPDOmap ret=%d out=%u B in=%u B",
-                         pdo_ret, static_cast<unsigned>(pdo_out), static_cast<unsigned>(pdo_in));
-        }
-
         const int mapped = ecx_config_map_group(ctx, link_.io_map.data(), 0);
         DUST_LOG_INF("ecat: ecx_config_map_group mapped %d bytes (io_map %u bytes)", mapped, static_cast<unsigned>(link_.io_map.size()));
 
@@ -632,6 +614,25 @@ private:
             DUST_LOG_ERR("ecat: IOmap too small, mapped %d > buffer %u",
                          mapped, static_cast<unsigned>(link_.io_map.size()));
             return false;
+        }
+
+        // 临时诊断：CoE 标记与在线 PDO 映射（config_map 之后，从站已在 PREOP）
+        if (ctx->slavecount >= 1)
+        {
+            const auto& probe = ctx->slavelist[1];
+
+            DUST_LOG_INF("ecat: slave 1 mbx_l=%u mbx_rl=%u mbx_wo=0x%04x mbx_ro=0x%04x mbx_proto=0x%04x CoE=%s",
+                         static_cast<unsigned>(probe.mbx_l), static_cast<unsigned>(probe.mbx_rl),
+                         static_cast<unsigned>(probe.mbx_wo), static_cast<unsigned>(probe.mbx_ro),
+                         static_cast<unsigned>(probe.mbx_proto),
+                         (probe.mbx_proto & ECT_MBXPROT_COE) != 0 ? "yes" : "no");
+
+            uint32_t   pdo_out  = 0;
+            uint32_t   pdo_in   = 0;
+            const int  pdo_ret  = ecx_readPDOmap(ctx, 1, &pdo_out, &pdo_in);
+
+            DUST_LOG_INF("ecat: readPDOmap ret=%d out=%u B in=%u B",
+                         pdo_ret, static_cast<unsigned>(pdo_out / 8U), static_cast<unsigned>(pdo_in / 8U));
         }
 
         for (uint16_t i = 1; i <= SlaveCount(); ++i)
