@@ -26,17 +26,6 @@ config USE_CMD_CONFIG
 
 # ============================================================================
 
-# =================               TRD_TEST               ====================
-
-config TRD_TEST
-    bool "User test thread"
-    default n
-    help
-      骨架自检线程：验证线程模板、日志、var 与注册段装配是否可用。
-      不依赖任何外设。
-
-# ============================================================================
-
 # =================            TRD_ETHERCAT             ======================
 
 config TRD_ETHERCAT
@@ -53,7 +42,7 @@ config TRD_ETHERCAT
 
 config TRD_CHASSIS
     bool "Host-side chassis closed-loop control thread"
-    default n
+    default y
     depends on TRD_ETHERCAT
     help
       上位机四轮全向底盘速度环：遥控与电机反馈从 EtherCAT 线程的 topic 读取，
@@ -72,3 +61,14 @@ config TRD_ROS2
     help
       将 MCU PDO 发布到 /ecat/rx_pdo，订阅 /ecat/tx_pdo 下发完整命令 PDO。
       需要加载 ROS 2 环境，关闭后不依赖 ROS 2。
+
+# ============================================================================
+
+# =================               TRD_TEST               ====================
+
+config TRD_TEST
+    bool "User test thread"
+    default n
+    help
+      骨架自检线程：验证线程模板、日志、var 与注册段装配是否可用。
+      不依赖任何外设。

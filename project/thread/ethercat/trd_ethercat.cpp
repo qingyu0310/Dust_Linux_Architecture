@@ -2,7 +2,7 @@
  * @file trd_ethercat.cpp
  * @author qingyu
  * @brief EtherCAT 周期线程 —— 建链、上位机 PDO 协议 v1 双向收发与电机命令下发
- * @version 4.8
+ * @version 4.11
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include "framework/topic/ecat_chassis/ecat_chassis.hpp"
 #include "framework/drivers/communication/ethercat/ecat.hpp"
 
 namespace thread::ethercat
@@ -45,6 +46,13 @@ static uint32_t last_feedback_seq_ = 0;     // 最近有效反馈的 feedback_se
 static bool     have_boot_id_     = false;  // 是否已读到过有效反馈
 static bool     feedback_invalid_ = false;  // 上一帧反馈是否校验失败
 static bool     session_accepted_ = false;  // 从站是否已接纳当前会话
+
+static topic::Subscriber<topic::ecat_chassis::ChassisCommandMessage> chassis_sub_ {topic::ecat_chassis::chassis_command_channel_};  // 底盘命令订阅者
+static topic::ecat_chassis::ChassisCommandMessage chassis_command_ {};           // 最近一次底盘命令
+static std::chrono::steady_clock::time_point chassis_command_at_ {};             // 最近一次命令接收时刻
+static bool     chassis_command_received_ = false;  // 是否收到过底盘命令
+static bool     chassis_command_active_   = false;  // 底盘命令当前是否生效
+constexpr auto  kChassisCommandTimeout = std::chrono::milliseconds(100);  // 命令停更超时
 
 /**
  * @brief 校验 TxPDO 头并维护会话状态；boot id 变化按从站重启处理
@@ -121,17 +129,94 @@ static bool ParseFeedback(const PdoInputs& inputs)
 }
 
 /**
- * @brief 按协议 v1 组一帧 RxPDO：256 字节按 0~255 顺序填充
+ * @brief 取最新底盘命令写入 RxPDO 电流区；停更 100 ms 归零
+ *
+ * @param command RxPDO 底盘电流命令
+ */
+static void UpdateChassisCommand(ChassisCommand& command)
+{
+    topic::ecat_chassis::ChassisCommandMessage message {};
+
+    if (chassis_sub_.TakeLatest(message))
+    {
+        chassis_command_          = message;
+        chassis_command_at_       = std::chrono::steady_clock::now();
+        chassis_command_received_ = true;
+    }
+
+    const bool fresh = chassis_command_received_ && (std::chrono::steady_clock::now() - chassis_command_at_) < kChassisCommandTimeout;
+
+    if (fresh)
+    {
+        std::memcpy(&command, chassis_command_.data, sizeof(chassis_command_.data));
+    }
+
+    if (fresh != chassis_command_active_)
+    {
+        chassis_command_active_ = fresh;
+        if (fresh)
+        {
+            DUST_LOG_INF("ecat: chassis command active");
+        }
+        else
+        {
+            DUST_LOG_WRN("ecat: chassis command expired, current zeroed");
+        }
+    }
+}
+
+/**
+ * @brief 按协议 v1 组一帧 RxPDO：命令头 + 底盘电流命令，其余预留区保持全零
+ *
+ * 组帧耗时用 steady_clock 实测后写入 compute_time_us，供从站侧诊断。
  */
 static void UpdateCommand()
 {
     auto& outputs = ecat_.OutputsRef();
     outputs = {};
 
-    for (uint32_t i = 0; i < sizeof(outputs.data); ++i)
-    {
-        outputs.data[i] = static_cast<uint8_t>(i);
-    }
+    const auto begin = std::chrono::steady_clock::now();
+
+    auto& header = outputs.header;
+
+    header.magic             = kCommandMagic;
+    header.proto_major       = kProtoMajor;
+    header.proto_minor       = kProtoMinor;
+    header.byte_length       = kPdoBytes;
+    header.slot_map_version  = kSlotMapVersion;
+    header.host_session      = host_session_;
+    header.command_seq       = command_seq_;
+    header.mcu_boot_id_echo  = boot_id_;
+    header.feedback_seq_echo = last_feedback_seq_;
+    header.lease_us          = kLeaseUs;
+    header.flags             = 0;
+
+    UpdateChassisCommand(outputs.chassis_command);
+
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count();
+    header.compute_time_us = static_cast<uint32_t>(elapsed_us);
+}
+
+/**
+ * @brief 把本拍电机反馈与遥控状态发布给底盘控制线程
+ *
+ * @param inputs 从站反馈镜像
+ */
+static void PublishFeedback(const PdoInputs& inputs)
+{
+    topic::ecat_chassis::ChassisFeedbackMessage feedback {};
+    std::memcpy(feedback.slot, inputs.motor_feedback, sizeof(feedback.slot));
+    topic::ecat_chassis::chassis_feedback_channel_.Publish(feedback);
+
+    topic::ecat_chassis::ChassisRemoteMessage remote {};
+    std::memcpy(remote.axis, inputs.remote.axis, sizeof(remote.axis));
+
+    remote.controls       	  = inputs.remote.controls;
+    remote.source_seq     	  = inputs.remote.source_seq;
+    remote.status 	     	  = inputs.remote.status;
+    remote.sample_tick_us 	  = inputs.remote.sample_tick_us;
+
+    topic::ecat_chassis::chassis_remote_channel_.Publish(remote);
 }
 
 /**
@@ -176,6 +261,8 @@ static init::Thread::TaskResult Task(void* context)
     const auto& header = inputs.header;
     const auto& remote = inputs.remote;
     const auto& imu    = inputs.imu;
+
+    PublishFeedback(inputs);
 
     DUST_LOG_DBG("ethercat",
                  "seq=%u tick_us=%u boot=0x%08x applied=%u session=%u accepted=%u status=0x%04x "

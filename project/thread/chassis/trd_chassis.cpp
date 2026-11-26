@@ -2,8 +2,8 @@
  * @file trd_chassis.cpp
  * @author qingyu
  * @brief 全向轮底盘线程 —— 遥控速度 → 逆运动学 → 四轮角速度环 → 电机命令话题
- * @version 0.1
- * @date 2026-11-25
+ * @version 0.2
+ * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
  *
@@ -40,9 +40,9 @@ static float last_target_[kMotorCount] {};        	// 惯性前馈上一拍目�
 static bool  target_valid_[kMotorCount] {};       	// 闭环切入首拍不做目标差分
 
 static Subscriber<ChassisRemoteMessage>   remote_sub_   {chassis_remote_channel_};       // 遥控订阅者
-static Subscriber<ChassisFeedbackMessage> feedback_sub_ {chassis_feedback_channel_};   // 电机反馈订阅者
+static Subscriber<ChassisFeedbackMessage> feedback_sub_ {chassis_feedback_channel_};     // 电机反馈订阅者
 
-static ChassisRemoteMessage   remote_state_ {};          		// 最近一次遥控状态 
+static ChassisRemoteMessage   remote_state_   {};          		// 最近一次遥控状态 
 static ChassisFeedbackMessage feedback_state_ {};        		// 最近一次电机反馈
 
 static std::chrono::steady_clock::time_point last_tick_ {};  	// 上一拍时刻
@@ -214,6 +214,13 @@ static init::Thread::TaskResult Task(void* context)
         for (uint8_t i = 0; i < kMotorCount; ++i)
         {
             const float omega = feedback_state_.slot[i].omega;
+
+            // 目标为 0 视为停车：清积分，避免残留积分电流顶住电机
+            if (std::fabs(target[i]) < kStopTarget)
+            {
+                ResetSpeedControl(i);
+                continue;
+            }
 
             // 摩擦前馈补偿维持该转速所需的电流，惯性前馈补偿加减速，PI 只修残差
             current[i] = SpeedCurrent(i, target[i], omega, dt);

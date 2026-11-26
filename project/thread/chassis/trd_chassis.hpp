@@ -2,8 +2,8 @@
  * @file trd_chassis.hpp
  * @author qingyu
  * @brief 四轮全向轮底盘参数 —— 运动学、摩擦/惯量辨识与速度环设计值
- * @version 0.1
- * @date 2026-11-25
+ * @version 0.2
+ * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
  *
@@ -40,6 +40,7 @@ constexpr float kJEq[kMotorCount] = { 0.01816f, 0.01951f, 0.01997f, 0.01881f };
 
 // 速度 PI 设计目标：J*s^2+(b+Kp)*s+Ki = J*(s+wn)^2，b 取正反向均值
 constexpr float kSpeedLoopWn        = 10.0f;   // 自然角频率 rad/s
+constexpr float kStopTarget         = 0.05f;   // 目标转速低于此值视为停车，清积分 rad/s
 constexpr float kSpeedLoopZeta      = 1.0f;    // 名义线性模型临界阻尼
 constexpr float kControlCurrentMax  = 5.0f;    // PI 与前馈相加后的总电流限幅 A
 constexpr float kIntegralCurrentMax = 2.0f;    // 积分补偿限幅 A

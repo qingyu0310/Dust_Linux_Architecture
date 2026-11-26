@@ -2,7 +2,7 @@
  * @file pdo_layout.hpp
  * @author qingyu
  * @brief 上位机 PDO 协议 v1 布局 —— RxPDO / TxPDO 各 256 B packed 结构
- * @version 0.5
+ * @version 0.8
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -69,14 +69,26 @@ struct ImuFeedback
 };
 
 /**
+ * @brief 单路底盘电机反馈（偏移 112，每槽 12 B）
+ */
+struct MotorFeedback
+{
+    uint16_t id;                     // 槽位号 0..3
+    uint16_t status;                 // bit0 在线；bit1 故障
+    float    omega;                  // 轮角速度 rad/s
+    float    current;                // 实际电流 A
+};
+
+/**
  * @brief TxPDO：从站 → 主站，256 B
  */
 struct PdoInputs
 {
-    FeedbackHeader header;           // 偏移 0
-    RemoteFeedback remote;           // 偏移 34
-    ImuFeedback    imu;              // 偏移 62
-    uint8_t        padding[144];     // 偏移 112，本版全零
+    FeedbackHeader header;                // 偏移 0
+    RemoteFeedback remote;                // 偏移 34
+    ImuFeedback    imu;                   // 偏移 62
+    MotorFeedback  motor_feedback[4];     // 偏移 112，槽 0–3 对应 CAN ID 0x201–0x204
+    uint8_t        padding[96];           // 偏移 160，补齐到 256 B
 };
 
 /**
@@ -100,11 +112,21 @@ struct CommandHeader
 };
 
 /**
+ * @brief 底盘电流命令（偏移 38，8 B）：一帧 C620 控制帧，从站原样转发到 CAN 0x200
+ */
+struct ChassisCommand
+{
+    int16_t current[4];                  // 四轮目标电流原始值，槽 0–3 ↔ CAN 0x201–0x204
+};
+
+/**
  * @brief RxPDO：上位机 → 下位机，256 B
  */
 struct PdoOutputs
 {
-    uint8_t data[256];                   // 完整下行帧，按协议 v1 逐字节布局
+    CommandHeader     header;            		// 偏移 0
+    ChassisCommand    chassis_command;   		// 偏移 38
+    uint8_t           reserved[210];     		// 偏移 46
 };
 
 #pragma pack(pop)
@@ -112,11 +134,15 @@ struct PdoOutputs
 static_assert(sizeof(FeedbackHeader) == 34, "FeedbackHeader must be 34 bytes");
 static_assert(sizeof(RemoteFeedback) == 28, "RemoteFeedback must be 28 bytes");
 static_assert(sizeof(ImuFeedback)    == 50, "ImuFeedback must be 50 bytes");
+static_assert(sizeof(MotorFeedback)  == 12, "MotorFeedback must be 12 bytes");
 static_assert(sizeof(CommandHeader)  == 38, "CommandHeader must be 38 bytes");
+static_assert(sizeof(ChassisCommand) == 8,  "ChassisCommand must be 8 bytes");
 static_assert(sizeof(PdoInputs)      == 256, "TxPDO must be 256 bytes");
 static_assert(sizeof(PdoOutputs)     == 256, "RxPDO must be 256 bytes");
 static_assert(offsetof(PdoInputs, remote) == 34, "RemoteFeedback must start at 34");
 static_assert(offsetof(PdoInputs, imu)    == 62, "ImuFeedback must start at 62");
+static_assert(offsetof(PdoInputs, motor_feedback) == 112, "MotorFeedback must start at 112");
+static_assert(offsetof(PdoOutputs, chassis_command)  == 38, "chassis command must start at 38");
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559, "PDO requires IEEE 754 binary32");
 
 constexpr uint32_t kFeedbackMagic  = 0x31424450;  // "PDB1"，小端读为 50 44 42 31
